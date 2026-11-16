@@ -159,8 +159,9 @@ Edit [shared/services.config.js](shared/services.config.js):
   container: 'my-portal-app',          // docker container name
   dependsOnDb: true,                   // true if it needs the shared host MongoDB
   quality: 'basic',                    // 'health' if internal.path is a real health route
-  internal: { port: 6100, path: '/my-portal/api/health' },       // optional; expect: 'lt500' to accept any non-5xx
-  public:   { url: 'https://iitg.ac.in/my-portal/' },            // optional
+  internal: { port: 6100, path: '/my-portal/api/health' },       // app port; expect: 'lt500' to accept any non-5xx
+  nginx:    { path: '/my-portal/api/health' },                   // through the host nginx; omit if not behind nginx
+  public:   { url: 'https://iitg.ac.in/my-portal/' },            // through the IITG proxy; omit if none
 }
 ```
 
@@ -194,7 +195,7 @@ Data: `Check` (TTL 30 d), `DailyRollup` (TTL 365 d, drives the 90-day bars), `Se
 
 ## Verification done
 
-- `cd shared && npm test`: 15/15 pass.
+- `cd shared && npm test`: 23/23 pass (adds the nginx tier: nginx_issue, upstream vs proxy-route degraded, whole-nginx banner, precedence).
 - `cd client && npm run build`: builds; the output has no external URLs (Geist is bundled, no Google Fonts/CDN).
 - End-to-end smoke run (in-memory MongoDB, a fake portal, real worker + real server): probes, debounce to DOWN after 3 cycles, one automatic incident per down service, daily rollup, `status.json` written, `/api/status`, history 24h/90d, `/api/health`, admin routes returning 401 without a token. Docker-dependent parts (container probe, socket proxy) were **not** exercised, so with the Docker API unreachable the container check reports "unknown" and the service is judged on its HTTP probes.
 
@@ -205,21 +206,24 @@ These are findings from the audit, listed for later. **None was changed.**
 **Monitoring accuracy**
 - Only `dday` (`/dday/api/health`) and `intern-2026` (`/intern-2026/api/health`) have real health routes. Every other service is probed on a shell/static route ("basic"), which proves the process is up but **not** that its database works. Suggest adding a `GET /health` that pings Mongo to: Placement, Intern, PhD, CCD App Backend, AIPC, DPR, the training backend and the industry portal.
 - `training-backend` (5004): no known route, so any HTTP response below 500 counts as up.
-- `industry_backend` is monitored by container state only (no public URL or known path). It was reported in a `Restarting (254)` loop; its repo has three different ports (code `8081`, compose `8081`, Dockerfile `EXPOSE 5002`) and the running image is unnamed, so the running container may not match the repo.
-- `ccd-app-backend` has no public probe (public URL unconfirmed).
-- The `https://iitg.ac.in/training/` public probe is attached to `training-app` (ccd-app :5001) **provisionally**. Confirm from `nginx -T` whether `/training` actually goes to `:5001` or to `frontend :3000`, then move the `public` entry in `shared/services.config.js`.
+- `industry_backend` is monitored by container state only, with the reason "Restart loop: /app/package.json missing in image" (`knownIssue` in `shared/services.config.js`; remove it once fixed so the real reason shows).
+- `ccd-app-backend`'s public URL `https://iitg.ac.in/ccd-app/` redirects to `/ccd-app/policies`; redirects count as up (never followed).
+- Confirmed with the server outputs: `/training` → `127.0.0.1:5001` (ccd-app), so the training public probe is on `training-app`.
 
-**Infrastructure / security (from AUDIT.md section D)**
-- One host MongoDB (`127.0.0.1:27017`) is a single point of failure for most portals.
-- Ports `5001`, `3000`, `5004`, `3012` (and possibly `8081`) are published on the host and reachable from the campus LAN, bypassing the reverse proxy.
+**Infrastructure / security (from AUDIT.md section D and the server outputs). None of this was changed.**
+- **CRITICAL: the host `mongod` listens on `0.0.0.0:27017`, reachable from the campus LAN.** Verify authentication is enabled, and bind it to `127.0.0.1` (`bindIp`) or firewall it. All portals use it from the host, so loopback is enough. The status page's own Mongo (`27018`) is bound to `127.0.0.1` and password-protected.
+- All portal ports (`5000`, `5005`, `5009`, `6001`, `6025`, `6026`, `7002`, `11034`) listen on all interfaces and can be reached directly, bypassing nginx. `3000`, `3012`, `5001` and `5004` are published by Docker on `0.0.0.0`. Bind them to `127.0.0.1` (or firewall) where nginx is the only intended entry.
+- **`industry_backend` restart loop (exit 254):** the image lacks `/app/package.json` (probably a missing bind mount or a bad build; the running image is unnamed `76976256732a`). Separately, nginx `/industry-backend` proxies to `:5002` but the code listens on `8081` (and the Dockerfile says `EXPOSE 5002`).
+- **Dead nginx routes returning 502:** `/oa-check` (→ 6021), `/ccd-industry/` (→ 5011), `/industry-backend` (→ 5002). Nothing listens on those ports (oa, industry-payment are not deployed).
+- **Duplicate `server` block** in `/etc/nginx/sites-enabled/default` (nginx warns "conflicting server name"). Which block wins is order-dependent; remove the duplicate when convenient.
+- One host MongoDB is a single point of failure for most portals.
 - Secret files in working trees: `.env` files in many repos, `CCD-App-Backend/serviceAccountKey.json`, and a Sentry DSN committed in the Placement frontend.
-- Stale/duplicate deployments: `Intern-Portal-2023` vs `latest-intern-portal` (same container name), `placement_portal_frontend` vs `placement23`, `ccdIndustry` has two frontends. Old Node 16/18 images and Mongoose 6 in the Placement/Intern portals.
-- The status mongo here uses a password but is otherwise default; it is bound to `127.0.0.1` only.
+- Stale/duplicate repos: `Intern-Portal-2023` vs `latest-intern-portal` (live: `latest-intern-portal`), `ccdIndustry` has two frontends. Old Node 16/18 images and Mongoose 6 in the Placement/Intern portals.
 
 **This project**
-- `nginx -T` / `docker network ls` / `docker inspect` outputs were not provided: the host nginx snippet is provisional and host-networking is inferred from the compose files, not confirmed. Verify `docker inspect --format '{{.HostConfig.NetworkMode}}' <container>`.
-- The upstream check runs from the server itself. If the server cannot resolve/reach `iitg.ac.in` for reasons unrelated to the campus link (e.g. no hairpin access to the public URL), every public probe fails and the banner reads "upstream". Confirm `curl -I https://iitg.ac.in/` works from the server.
-- `tecnativa/docker-socket-proxy:0.3.0` is pinned from memory; confirm the tag pulls.
+- The upstream check runs from the server itself. It reached `https://iitg.ac.in/` fine (200, 0.23 s) when tested, so this is only a caveat if that changes.
+- `tecnativa/docker-socket-proxy:0.3.0` is pinned from memory; confirm the tag pulls. If not, use the newest tag.
+- Not yet verified on the real server: the `Host: 172.17.1.148` header sent by the nginx probe matches the first server block (it should: that block has `server_name 172.17.1.148`).
 
 ## Optional Phase 3 (not built)
 
