@@ -1,46 +1,46 @@
-// Keeps the latest snapshot in memory and fans it out to SSE clients.
-// The worker writes the snapshot to Mongo (Meta 'snapshot'); we poll it and push on change.
+// Serves the latest snapshot and fans it out to SSE clients.
+// Source of truth = status.json (written by the worker every cycle, even while MongoDB is down).
+// When the database is reachable, incidents/maintenance are overlaid live so admin edits show instantly.
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { cfg } from './config.js';
 
-export function createHub(models) {
+export function createHub(models, isDbUp = () => true) {
   const clients = new Set();
-  let current = null;
-  let currentTs = 0;
+  const file = path.join(cfg.statusDir, 'status.json');
+  let lastMtime = 0;
 
-  // Incidents and maintenance are overlaid live so admin edits show instantly instead of at the next worker cycle.
   async function overlay(snapshot) {
-    const { Incident, Maintenance } = models;
-    const now = new Date();
-    const [active, recent, maint] = await Promise.all([
-      Incident.find({ status: { $ne: 'resolved' } }).sort({ startedAt: -1 }).lean(),
-      Incident.find({ status: 'resolved' }).sort({ resolvedAt: -1 }).limit(15).lean(),
-      Maintenance.find({ end: { $gte: now } }).sort({ start: 1 }).lean(),
-    ]);
-    const slim = (i) => ({
-      id: String(i._id), title: i.title, status: i.status, serviceKeys: i.serviceKeys, autoCreated: i.autoCreated,
-      startedAt: i.startedAt, resolvedAt: i.resolvedAt || null,
-      updates: (i.updates || []).map((u) => ({ message: u.message, status: u.status, author: u.author, ts: u.ts })),
-    });
-    return {
-      ...snapshot,
-      incidents: { active: active.map(slim), recent: recent.map(slim) },
-      maintenance: maint.map((m) => ({ id: String(m._id), services: m.services, start: m.start, end: m.end, note: m.note })),
-    };
+    if (!isDbUp()) return snapshot;
+    try {
+      const { Incident, Maintenance } = models;
+      const now = new Date();
+      const [active, recent, maint] = await Promise.all([
+        Incident.find({ status: { $ne: 'resolved' } }).sort({ startedAt: -1 }).lean().maxTimeMS(2000),
+        Incident.find({ status: 'resolved' }).sort({ resolvedAt: -1 }).limit(15).lean().maxTimeMS(2000),
+        Maintenance.find({ end: { $gte: now } }).sort({ start: 1 }).lean().maxTimeMS(2000),
+      ]);
+      const slim = (i) => ({
+        id: String(i._id), title: i.title, status: i.status, serviceKeys: i.serviceKeys, autoCreated: i.autoCreated,
+        startedAt: i.startedAt, resolvedAt: i.resolvedAt || null,
+        updates: (i.updates || []).map((u) => ({ message: u.message, status: u.status, author: u.author, ts: u.ts })),
+      });
+      return {
+        ...snapshot,
+        incidents: { active: active.map(slim), recent: recent.map(slim) },
+        maintenance: maint.map((m) => ({ id: String(m._id), services: m.services, start: m.start, end: m.end, note: m.note })),
+      };
+    } catch {
+      return snapshot; // database trouble: serve the file as-is, never error
+    }
   }
-
-  async function load() {
-    const doc = await models.Meta.findOne({ key: 'snapshot' }).lean();
-    if (!doc?.value) return null;
-    return { snapshot: doc.value, updatedAt: doc.updatedAt?.getTime?.() || 0 };
-  }
-
-  const stale = (snapshot) => !snapshot || Date.now() - new Date(snapshot.generatedAt).getTime() > cfg.staleAfterSec * 1000;
 
   async function get() {
-    const l = await load();
-    if (!l) return null;
-    const full = await overlay(l.snapshot);
-    return { ...full, stale: stale(l.snapshot) };
+    let raw;
+    try { raw = JSON.parse(await fs.readFile(file, 'utf8')); } catch { return null; }
+    const full = await overlay(raw);
+    const stale = Date.now() - new Date(raw.generatedAt).getTime() > cfg.staleAfterSec * 1000;
+    return { ...full, stale };
   }
 
   function send(payload) {
@@ -50,19 +50,18 @@ export function createHub(models) {
 
   async function poll() {
     try {
-      const l = await load();
-      if (!l || l.updatedAt === currentTs) return;
-      currentTs = l.updatedAt;
-      current = await get();
-      if (clients.size && current) send(current);
-    } catch (e) { console.error('[hub] poll failed', e.message); }
+      const m = (await fs.stat(file)).mtimeMs;
+      if (m === lastMtime) return;
+      lastMtime = m;
+      if (clients.size) { const p = await get(); if (p) send(p); }
+    } catch { /* no status.json yet */ }
   }
 
   return {
     start() { poll(); return setInterval(poll, 3000); },
     get,
     async broadcast() { const p = await get(); if (p && clients.size) send(p); },
-    add(res) { clients.add(res); if (current) res.write(`event: status\ndata: ${JSON.stringify(current)}\n\n`); },
+    add(res) { clients.add(res); get().then((p) => { if (p) res.write(`event: status\ndata: ${JSON.stringify(p)}\n\n`); }).catch(() => {}); },
     remove(res) { clients.delete(res); },
     closeAll() { for (const res of clients) { try { res.end(); } catch { /* already closed */ } } clients.clear(); },
     size: () => clients.size,

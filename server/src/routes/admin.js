@@ -18,7 +18,7 @@ function auth(req, res, next) {
   } catch { res.status(401).json({ error: 'unauthorized' }); }
 }
 
-export function adminRouter({ models, hub }) {
+export function adminRouter({ models, hub, isDbUp = () => true }) {
   const r = Router();
   const { Service, Incident, Maintenance, Command, Meta } = models;
 
@@ -35,6 +35,11 @@ export function adminRouter({ models, hub }) {
 
   r.use(auth);
   r.get('/me', (req, res) => res.json({ user: req.admin.sub }));
+
+  // Everything below reads or writes the status database: answer 503 clearly while it is unreachable.
+  r.use((req, res, next) => (isDbUp() ? next() : res.status(503).json({
+    error: 'Admin data is temporarily unavailable: the status database (shared MongoDB) is not reachable.', code: 'DB_UNAVAILABLE',
+  })));
 
   // ---- incidents ----
   r.get('/incidents', wrap(async (req, res) => {

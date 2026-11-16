@@ -11,7 +11,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      [`${BASE}/api`]: { target: 'http://127.0.0.1:4000', rewrite: (p) => p.replace(BASE, '') },
+      [`${BASE}/api`]: { target: 'http://127.0.0.1:6060', rewrite: (p) => p.replace(BASE, '') },
     },
   },
   build: { outDir: 'dist', chunkSizeWarningLimit: 1500 },

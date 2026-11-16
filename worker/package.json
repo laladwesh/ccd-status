@@ -5,12 +5,15 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "seed": "node src/seedCli.js"
+    "seed": "node src/seedCli.js",
+    "test": "node --test"
   },
   "dependencies": {
     "mongoose": "^8.9.0",
     "nodemailer": "^6.9.16",
     "p-limit": "^6.2.0"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }

@@ -3,11 +3,11 @@ import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
-import { cfg } from './config.js';
+import { cfg, DB_MESSAGE } from './config.js';
 import { publicRouter } from './routes/public.js';
 import { adminRouter } from './routes/admin.js';
 
-export function createApp({ models, hub }) {
+export function createApp({ models, hub, isDbUp }) {
   const app = express();
   // Behind gateway nginx -> host nginx -> IITG proxy. Trust only private/loopback hops, never `true`
   // (that lets any client spoof X-Forwarded-For and bypass the rate limiter).
@@ -27,14 +27,18 @@ export function createApp({ models, hub }) {
   app.use(express.json({ limit: '100kb' }));
   app.use('/api', rateLimit({ windowMs: 60 * 1000, limit: 240, standardHeaders: true, legacyHeaders: false }));
 
-  app.use('/api', publicRouter({ models, hub }));
-  app.use('/api/admin', adminRouter({ models, hub }));
+  app.use('/api', publicRouter({ models, hub, isDbUp }));
+  app.use('/api/admin', adminRouter({ models, hub, isDbUp }));
 
   app.use((req, res) => res.status(404).json({ error: 'not found' }));
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
+    // Any database failure surfaces as a clear 503, never a 500 with internals.
+    if (/^Mongo|MongooseError|buffering timed out/i.test(`${err?.name} ${err?.message}`)) {
+      return res.status(503).json({ error: DB_MESSAGE, code: 'DB_UNAVAILABLE' });
+    }
     console.error('[server]', err);
-    res.status(err.status || 500).json({ error: err.expose ? err.message : 'internal error' });
+    return res.status(err.status || 500).json({ error: err.expose ? err.message : 'internal error' });
   });
   return app;
 }

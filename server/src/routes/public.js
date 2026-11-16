@@ -1,48 +1,55 @@
 import { Router } from 'express';
-import mongoose from 'mongoose';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { p95FromBuckets } from '../../../shared/status.js';
-import { cfg } from '../config.js';
+import { cfg, DB_MESSAGE } from '../config.js';
 
 const RANGES = { '24h': { ms: 86400000, bin: 15 }, '7d': { ms: 7 * 86400000, bin: 60 } };
 const wrap = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
-export function publicRouter({ models, hub }) {
+export function publicRouter({ models, hub, isDbUp }) {
   const r = Router();
-  const { Service, Check, DailyRollup, Incident, Meta } = models;
+  const { Service, Check, DailyRollup, Incident } = models;
 
+  // Database-backed endpoints answer 503 with a clear message instead of hanging or erroring.
+  const requireDb = (req, res, next) => (isDbUp() ? next() : res.status(503).json({ error: DB_MESSAGE, code: 'DB_UNAVAILABLE' }));
+
+  // Health of the status page itself. ALWAYS 200 while this process can serve: it must NOT fail just because
+  // MongoDB is down, otherwise Docker would restart the status page in the middle of the outage it is reporting.
   r.get('/health', wrap(async (req, res) => {
-    const dbOk = mongoose.connection.readyState === 1;
-    const snap = dbOk ? await Meta.findOne({ key: 'snapshot' }).lean() : null;
-    const ageSec = snap?.value?.generatedAt ? Math.round((Date.now() - new Date(snap.value.generatedAt).getTime()) / 1000) : null;
+    let ageSec = null;
+    try { ageSec = Math.round((Date.now() - (await fs.stat(path.join(cfg.statusDir, 'status.json'))).mtimeMs) / 1000); } catch { /* none yet */ }
     const workerOk = ageSec != null && ageSec < cfg.staleAfterSec;
-    res.status(dbOk ? 200 : 503).json({ ok: dbOk, db: dbOk, worker: workerOk, snapshotAgeSec: ageSec, sseClients: hub.size(), uptimeSec: Math.round(process.uptime()) });
+    const db = isDbUp();
+    res.json({ ok: true, status: db && workerOk ? 'ok' : 'degraded', db, worker: workerOk, snapshotAgeSec: ageSec, sseClients: hub.size(), uptimeSec: Math.round(process.uptime()) });
   }));
 
+  // Latest snapshot. Served from status.json, so it works with the database down.
   r.get('/status', wrap(async (req, res) => {
     const s = await hub.get();
-    if (!s) return res.status(503).json({ error: 'no data yet: worker has not published a snapshot' });
+    if (!s) return res.status(503).json({ error: 'no data yet: the worker has not published a snapshot' });
     res.set('Cache-Control', 'no-store').json(s);
   }));
 
-  r.get('/incidents', wrap(async (req, res) => {
+  r.get('/incidents', requireDb, wrap(async (req, res) => {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
-    const list = await Incident.find({}).sort({ startedAt: -1 }).limit(limit).lean();
+    const list = await Incident.find({}).sort({ startedAt: -1 }).limit(limit).lean().maxTimeMS(3000);
     res.json(list.map((i) => ({ ...i, id: String(i._id), _id: undefined })));
   }));
 
-  r.get('/services/:key/history', wrap(async (req, res) => {
+  r.get('/services/:key/history', requireDb, wrap(async (req, res) => {
     const range = req.query.range || '24h';
     if (!['24h', '7d', '90d'].includes(range)) return res.status(400).json({ error: 'range must be 24h, 7d or 90d' });
-    const svc = await Service.findOne({ key: req.params.key }).lean();
+    const svc = await Service.findOne({ key: req.params.key }).lean().maxTimeMS(3000);
     if (!svc) return res.status(404).json({ error: 'unknown service' });
 
-    const recent = await Check.find({ serviceKey: svc.key }).sort({ ts: -1 }).limit(30).select('-_id -__v').lean();
-    const incidents = await Incident.find({ serviceKeys: svc.key }).sort({ startedAt: -1 }).limit(10).lean();
+    const recent = await Check.find({ serviceKey: svc.key }).sort({ ts: -1 }).limit(30).select('-_id -__v').lean().maxTimeMS(3000);
+    const incidents = await Incident.find({ serviceKeys: svc.key }).sort({ startedAt: -1 }).limit(10).lean().maxTimeMS(3000);
     const base = { key: svc.key, range, recent, incidents: incidents.map((i) => ({ id: String(i._id), title: i.title, status: i.status, startedAt: i.startedAt, resolvedAt: i.resolvedAt || null })) };
 
     if (range === '90d') {
       const since = new Date(Date.now() - 90 * 86400000);
-      const rows = await DailyRollup.find({ serviceKey: svc.key, dayStart: { $gte: since } }).sort({ day: 1 }).lean();
+      const rows = await DailyRollup.find({ serviceKey: svc.key, dayStart: { $gte: since } }).sort({ day: 1 }).lean().maxTimeMS(3000);
       return res.json({
         ...base,
         days: rows.map((x) => ({
@@ -67,7 +74,7 @@ export function publicRouter({ models, hub }) {
         okCount: { $sum: { $cond: [{ $eq: ['$ok', true] }, 1, 0] } },
       } },
       { $sort: { _id: 1 } },
-    ]);
+    ]).option({ maxTimeMS: 5000 });
     res.json({
       ...base,
       points: points.map((p) => ({

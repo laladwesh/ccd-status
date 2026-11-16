@@ -1,12 +1,23 @@
-import { DEFAULTS } from '../../shared/services.config.js';
-import { buildMongoUrl } from '../../shared/mongo-url.js';
+import { DEFAULTS, infra } from '../../shared/services.config.js';
 
 const env = process.env;
 const bool = (v) => ['1', 'true', 'yes', 'on'].includes(String(v || '').toLowerCase());
 const num = (v, d) => (Number.isFinite(Number(v)) && v !== undefined && v !== '' ? Number(v) : d);
 
+// Plain URI, own database name "ccd-status". The worker never touches any other database.
+const mongoUri = env.MONGO_URI || 'mongodb://127.0.0.1:27017/ccd-status';
+
+/** host:port of the mongod to health-probe (same server the URI points at). Falls back to the config default. */
+export function mongoProbeTarget(uri = mongoUri) {
+  try {
+    const u = new URL(uri);
+    if (u.hostname) return { host: u.hostname, port: Number(u.port) || 27017, timeoutMs: infra.mongo.timeoutMs };
+  } catch { /* multi-host or unusual URI */ }
+  return infra.mongo;
+}
+
 export const cfg = {
-  mongoUrl: buildMongoUrl(env),
+  mongoUri,
   dockerUrl: (env.DOCKER_PROXY_URL || 'http://127.0.0.1:23750').replace(/\/$/, ''),
   statusDir: env.STATUS_DIR || '/data',
   probeHost: env.PROBE_HOST || '127.0.0.1',

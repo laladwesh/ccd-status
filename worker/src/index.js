@@ -1,73 +1,96 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import mongoose from 'mongoose';
-import { cfg } from './config.js';
+import { cfg, mongoProbeTarget } from './config.js';
 import { createModels } from '../../shared/models.js';
 import { seedServices } from '../../shared/seed.js';
+import { services as configuredServices, SERVER_IP } from '../../shared/services.config.js';
+import { buildSnapshot } from '../../shared/snapshot.js';
 import { createAlerter } from './alerts.js';
 import { createEngine } from './engine.js';
-import { buildSnapshot, writeStatusFile } from './snapshot.js';
+import { createStore } from './store.js';
+import { writeStatusFile, writeHeartbeat } from './statusFile.js';
 import { dockerSnapshot } from './probes/docker.js';
 
 const log = console;
+// Indexes are created explicitly after each (re)connect; without this, a failed initial connect would
+// leave the TTL indexes missing. Buffering is capped so DB calls fail fast instead of hanging.
+mongoose.set('autoIndex', false);
+mongoose.set('bufferTimeoutMS', 3000);
+
 const models = createModels(mongoose);
 const alerter = createAlerter(log);
-const engine = createEngine({ models, alerter, log });
+const dbReady = () => mongoose.connection.readyState === 1;
+const store = createStore({ models, log, isDbUp: dbReady });
+const getServices = () => configuredServices.filter((s) => store.isEnabled(s.key));
+const engine = createEngine({ store, alerter, getServices, mongoTarget: mongoProbeTarget(), log });
+
 let stopping = false;
 let busy = false;
-let lastSnapshot = null;
+let lastRefresh = 0;
+let containersCache = null;
+let setupDone = false;       // per connection: indexes + seed + hydrate
+let connecting = null;
+let attempt = 0;
+let nextAttemptAt = 0;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const dbReady = () => mongoose.connection.readyState === 1;
+mongoose.connection.on('disconnected', () => { setupDone = false; log.error('[worker] database connection lost: running from memory, results are buffered'); });
+mongoose.connection.on('reconnected', () => log.log('[worker] database reconnected'));
 
-async function connectWithRetry() {
-  for (let attempt = 1; !stopping; attempt++) {
-    try {
-      await mongoose.connect(cfg.mongoUrl, { serverSelectionTimeoutMS: 5000 });
-      log.log('[worker] connected to status database');
-      return;
-    } catch (e) {
-      log.error(`[worker] mongo connect failed (attempt ${attempt}): ${e.message}`);
-      await sleep(Math.min(30000, attempt * 2000));
+/** Runs once per (re)connection. Everything here is best-effort: a failure just retries on the next tick. */
+async function onConnected() {
+  await Promise.all(Object.values(models).map((m) => m.createIndexes()));
+  await seedServices(models);
+  await store.hydrate();
+  engine.syncFromStore();
+  setupDone = true;
+  log.log('[worker] database ready; hydrated from storage');
+}
+
+/** Non-blocking connection manager: reconnect with backoff (2 s steps up to 30 s), never throws, never crashes. */
+function ensureDb() {
+  if (dbReady()) {
+    if (!setupDone && !connecting) {
+      connecting = onConnected().catch((e) => log.error('[worker] post-connect setup failed:', e.message)).finally(() => { connecting = null; });
     }
+    return;
   }
+  if (connecting || Date.now() < nextAttemptAt) return;
+  connecting = mongoose.connect(cfg.mongoUri, { serverSelectionTimeoutMS: 5000, connectTimeoutMS: 5000 })
+    .then(() => { attempt = 0; return onConnected(); })
+    .catch((e) => {
+      attempt += 1;
+      nextAttemptAt = Date.now() + Math.min(30000, attempt * 2000);
+      log.error(`[worker] mongo connect failed (attempt ${attempt}, retry in ${Math.round((nextAttemptAt - Date.now()) / 1000)}s): ${(e.message || '').slice(0, 120)}`);
+    })
+    .finally(() => { connecting = null; });
 }
 
-// The Docker healthcheck reads this file's age (< 120 s). Written after every completed loop,
-// including a loop that could not reach the database (restarting the worker would not help then).
-const heartbeat = () => fs.writeFile(path.join(cfg.statusDir, 'heartbeat'), String(Date.now())).catch(() => {});
-
-async function publish() {
-  const snapshot = await buildSnapshot({ models, engine });
-  lastSnapshot = snapshot;
-  await models.Meta.updateOne({ key: 'snapshot' }, { $set: { value: snapshot } }, { upsert: true });
-  await writeStatusFile(snapshot).catch((e) => log.error('[worker] status.json write failed', e.message));
-}
-
-// The status DB lives on the shared host mongod. When that is down we cannot save checks or build a
-// fresh snapshot, but the page must still say so: re-publish the last snapshot with a database banner.
-async function publishDegraded(reason) {
-  if (!lastSnapshot) return;
-  const s = structuredClone(lastSnapshot);
-  s.generatedAt = new Date().toISOString();
-  s.overall = { status: 'database', message: 'Shared database down' };
-  if (s.infra?.database) s.infra.database = { ...s.infra.database, state: 'down', detail: reason };
-  await writeStatusFile(s).catch((e) => log.error('[worker] status.json write failed', e.message));
+function snapshotNow() {
+  return buildSnapshot({
+    services: getServices().map((s) => ({ ...s, enabled: true })),
+    states: store.allStates(),
+    rollups: store.rollupRows(),
+    incidents: store.incidentsView(),
+    maintenance: store.maintenanceView(),
+    infraFlags: engine.getInfra(),
+    dbConnected: dbReady() && setupDone,
+    serverLabel: `Server ${SERVER_IP}`,
+  });
 }
 
 async function getDocker() {
   try {
     const map = await dockerSnapshot();
-    await models.Meta.updateOne({ key: 'containers' }, { $set: { value: { updatedAt: new Date(), items: [...map.values()] } } }, { upsert: true });
+    containersCache = { updatedAt: new Date(), items: [...map.values()] };
     return { map, err: null };
   } catch (e) {
-    log.error('[worker] docker/db step failed:', e.message);
+    log.error('[worker] docker api unavailable:', e.message);
     return { map: null, err: e };
   }
 }
 
 async function handleCommands() {
-  const { Command, Meta } = models;
+  const { Command } = models;
   let any = false;
   for (;;) {
     const cmd = await Command.findOneAndUpdate({ claimedAt: null, doneAt: null }, { $set: { claimedAt: new Date() } }, { sort: { createdAt: 1 }, new: true });
@@ -84,46 +107,62 @@ async function handleCommands() {
       } else result = { error: `unknown command ${cmd.type}` };
     } catch (e) { result = { error: e.message }; }
     await Command.updateOne({ _id: cmd._id }, { $set: { doneAt: new Date(), result } });
-    await Meta.updateOne({ key: 'alerts' }, { $set: { value: alerter.channels() } }, { upsert: true });
   }
+}
+
+/** Database-dependent extras. Failure here must never affect probing or status.json. */
+async function dbExtras() {
+  if (!dbReady() || !setupDone) return false;
+  let hadCommands = false;
+  try {
+    hadCommands = await handleCommands();
+    if (Date.now() - lastRefresh > 30000) { await store.refresh(); lastRefresh = Date.now(); }
+    const { Meta } = models;
+    await Meta.updateOne({ key: 'alerts' }, { $set: { value: alerter.channels() } }, { upsert: true });
+    if (containersCache) await Meta.updateOne({ key: 'containers' }, { $set: { value: containersCache } }, { upsert: true });
+  } catch (e) { log.error('[worker] database extras failed:', (e.message || '').slice(0, 120)); }
+  return hadCommands;
 }
 
 async function tick() {
   if (busy || stopping) return;
   busy = true;
   try {
-    const hadCommands = await handleCommands();
+    ensureDb();                                   // reconnect in the background, never awaited here
+    const hadCommands = await dbExtras();
     const infraDue = engine.infraDue();
-    if (infraDue) await engine.runInfra(); // infra first: services use its result
+    if (infraDue) await engine.runInfra();        // infra first: services use its result
     const { map, err } = await getDocker();
     const checked = await engine.runServices(map, err);
     const flushed = await alerter.flush();
-    if (infraDue || checked || hadCommands) await publish();
+    if (infraDue || checked || hadCommands) await writeStatusFile(snapshotNow()); // every cycle, DB up or down
     if (flushed) log.log('[alerts]', JSON.stringify(flushed));
-    await heartbeat();
+    await store.flush();                          // write-behind; no-op while the DB is down, buffers keep growing (capped)
   } catch (e) {
     log.error('[worker] tick failed', e);
-    if (!dbReady()) { await publishDegraded(e.message?.slice(0, 120) || 'database unreachable'); await heartbeat(); }
-  } finally { busy = false; }
+    // Last resort: still publish what we know so the page does not go stale.
+    try { await writeStatusFile(snapshotNow()); } catch { /* ignore */ }
+  } finally {
+    await writeHeartbeat();                       // healthy = loop alive; independent of the database
+    busy = false;
+  }
 }
 
 async function main() {
-  log.log('[worker] starting; alerts:', JSON.stringify(alerter.channels()));
-  await connectWithRetry();
-  if (stopping) return;
-  await seedServices(models);
-  await engine.loadState();
-  await models.Meta.updateOne({ key: 'alerts' }, { $set: { value: alerter.channels() } }, { upsert: true });
+  log.log('[worker] starting; alerts:', JSON.stringify(alerter.channels()), '; db:', cfg.mongoUri.replace(/\/\/[^@/]*@/, '//***@'));
+  ensureDb();
+  for (let i = 0; i < 12 && !(dbReady() && setupDone) && connecting; i++) await sleep(500); // short grace; never required
   await tick();
   const timer = setInterval(tick, cfg.tickMs);
 
-  // Graceful shutdown: stop scheduling, let the in-flight check loop finish (max 20 s), close mongoose.
+  // Graceful shutdown: stop scheduling, let the in-flight loop finish (max 20 s), flush buffers once, close mongoose.
   const shutdown = async (sig) => {
     if (stopping) return;
     stopping = true;
     clearInterval(timer);
     log.log(`[worker] ${sig}: waiting for in-flight checks`);
     for (let waited = 0; busy && waited < 20000; waited += 200) await sleep(200);
+    try { await writeStatusFile(snapshotNow()); await store.flush(); } catch { /* best effort */ }
     await mongoose.disconnect().catch(() => {});
     log.log('[worker] stopped');
     process.exit(0);
@@ -132,4 +171,5 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
+process.on('unhandledRejection', (e) => log.error('[worker] unhandled rejection:', e?.message || e));
 main().catch((e) => { log.error('[worker] fatal', e); process.exit(1); });

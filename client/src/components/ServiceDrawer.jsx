@@ -37,7 +37,7 @@ export default function ServiceDrawer({ service, onClose }) {
     setLoading(true); setErr(false);
     api.get(`/services/${service.key}/history`, { params: { range } })
       .then((r) => { if (!cancelled) setHist(r.data); })
-      .catch(() => { if (!cancelled) { setHist(null); setErr(true); } })
+      .catch(() => { if (!cancelled) { setHist(null); setErr(true); } }) // 503 (database down) or API unreachable
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [service, range]);
@@ -90,7 +90,7 @@ export default function ServiceDrawer({ service, onClose }) {
                   </ResponsiveContainer>
                 ) : (
                   <div className="h-full flex items-center justify-center">
-                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={err ? 'History unavailable while the API is unreachable' : 'No latency data for this range'} />
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={err ? 'History temporarily unavailable' : 'No latency data for this range'} />
                   </div>
                 )}
               </div>
@@ -101,7 +101,7 @@ export default function ServiceDrawer({ service, onClose }) {
             <h3 className="text-sm font-semibold mb-2">Recent checks</h3>
             <Table
               size="small" rowKey={(r) => `${r.ts}-${r.probeType}`} dataSource={hist?.recent || []} pagination={{ pageSize: 6, size: 'small', hideOnSinglePage: true }}
-              locale={{ emptyText: err ? 'Unavailable' : 'No checks yet' }}
+              locale={{ emptyText: err ? 'History temporarily unavailable' : 'No checks yet' }}
               columns={[
                 { title: 'Time', dataIndex: 'ts', render: (t) => dayjs(t).format('D MMM HH:mm:ss'), width: 120 },
                 { title: 'Probe', dataIndex: 'probeType', width: 80 },
@@ -113,6 +113,7 @@ export default function ServiceDrawer({ service, onClose }) {
 
           <section>
             <h3 className="text-sm font-semibold mb-2">Incidents</h3>
+            {err && <p className="text-sm" style={{ color: '#7C2D3E' }}>History temporarily unavailable. The live status above is not affected.</p>}
             {hist?.incidents?.length ? hist.incidents.map((i) => (
               <div key={i.id} className="text-sm py-1 border-t first:border-t-0" style={{ borderColor: '#EDF0F5' }}>
                 <Tag color={INCIDENT_COLOR[i.status]}>{i.status}</Tag>{i.title}
