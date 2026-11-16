@@ -31,12 +31,17 @@ Served at `/ccd-status/` (host nginx on `172.17.1.148` → gateway container on 
 ### Status logic (`shared/status.js`)
 | State | Meaning |
 |---|---|
-| `operational` | container running, internal probe OK, public probe OK |
-| `degraded` | up but p95 latency over 2 s, **or** internal OK while public fails and `iitg.ac.in` is fine |
-| `upstream_outage` | internal OK, public failing, **and** iitg.ac.in DNS/homepage failing. One banner, not N red services |
+| `operational` | container running, app port OK, host nginx path OK, public URL OK |
+| `degraded` | up but p95 latency over 2 s, **or** app + nginx OK, public fails, `iitg.ac.in` OK → "IITG proxy route issue for this path" |
+| `nginx_issue` | app port OK but the **host nginx** path fails ("Server nginx issue"). If nginx refuses connections or *all* nginx routes fail while the apps are up, one **Host nginx** infra banner is shown instead of N red services |
+| `upstream_outage` | app + nginx OK, public failing, **and** iitg.ac.in DNS/homepage failing. One banner, not N red services |
 | `db_impacted` | the shared host MongoDB is down and the service depends on it |
-| `down` | container not running / restart loop, or internal probe fails |
+| `down` | container not running / restart loop, or the app port probe fails |
 | `maintenance` | inside an admin maintenance window (no incidents, no alerts) |
+
+Three HTTP tiers per service, innermost first: **app port** (`127.0.0.1:<port>`) → **host nginx** (`http://127.0.0.1<path>` with `Host: 172.17.1.148`) → **public** (`https://iitg.ac.in/...`). A failing app port is always `down` (nginx would 502 too), never an nginx issue. Services that are not behind nginx (training `frontend`/`backend`, `placement_portal_frontend`) only have the app-port probe; `industry_backend` is container-only.
+
+Overall banner precedence: upstream → host nginx → shared database → per-service counts.
 
 Anti-flapping: worsening needs **3** consecutive identical results, recovery **2**. Interval 60 s, timeout 10 s, 5 concurrent probes.
 A restart loop (`Restarting`, or 3+ restarts in 10 min) counts as DOWN, so `industry_backend` shows DOWN.
@@ -72,23 +77,71 @@ The portals aren't running on your laptop, so locally most services show DOWN. T
 
 ## Deploy on 172.17.1.148
 
+Server facts this was built against: Docker Compose v2.26.1; ports `6059`, `27018`, `23750` free; the server reaches `https://iitg.ac.in/` directly (no HTTP proxy).
+
+### 1. Get the code onto the server (private GitHub repo)
+Pushing is done by you from your own machine (nothing here pushes). On the server use a **read-only deploy key**, not a personal token:
+
 ```bash
-git clone <repo> ccd-status && cd ccd-status
-cp .env.example .env && nano .env            # see comments inside
-# admin password hash (use single quotes in .env: it contains $):
-docker run --rm -v "$PWD/server:/app" -w /app node:20-alpine sh -c "npm install --silent && npm run -s hash-password -- 'your-long-password'"
-docker compose up -d --build
-docker compose ps                            # all should become "healthy"
+# on the server, as the deploy user
+ssh-keygen -t ed25519 -f ~/.ssh/ccd_status_deploy -N "" -C "ccd-status deploy"
+cat ~/.ssh/ccd_status_deploy.pub          # GitHub repo -> Settings -> Deploy keys -> Add (leave "Allow write access" OFF)
+
+cd ~ && GIT_SSH_COMMAND="ssh -i ~/.ssh/ccd_status_deploy -o IdentitiesOnly=yes" \
+  git clone git@github.com:<OWNER>/<REPO>.git ccd-status
+cd ccd-status && git config core.sshCommand "ssh -i ~/.ssh/ccd_status_deploy -o IdentitiesOnly=yes"
 ```
+If campus egress blocks SSH on port 22, use GitHub's SSH-over-443: `git clone ssh://git@ssh.github.com:443/<OWNER>/<REPO>.git`.
+Later updates: `git pull && docker compose up -d --build`.
 
-1. **Host nginx.** Add the `location /ccd-status/` block from [deploy/host-nginx-ccd-status.conf](deploy/host-nginx-ccd-status.conf) inside the existing `server { listen 80 ... }` that serves 172.17.1.148, then `sudo nginx -t && sudo systemctl reload nginx`.
-   **This snippet is provisional**: the `nginx -T` output was not available when it was written. Compare it with the real config (which server block, any `include` structure) before applying.
-2. **Check** `curl -s http://127.0.0.1:6059/ccd-status/api/health` and open `http://172.17.1.148/ccd-status/`.
-3. **IITG webmaster:** proxy `https://iitg.ac.in/ccd-status/` → `http://172.17.1.148/ccd-status/` (keep the path as is; SSE needs response buffering off for `/ccd-status/api/stream`, otherwise the page just polls `status.json` every 30 s, which also works).
+### 2. Configure and start
+```bash
+cp .env.example .env && chmod 600 .env && nano .env     # see comments inside
 
-Ports used: `6059` (gateway), `27018` (status mongo), `23750` (docker proxy), all bound to `127.0.0.1` only. Every container has `restart: unless-stopped`, a HEALTHCHECK, a memory limit, and log rotation (`10m × 3`).
+# admin password hash -> put it in .env as ADMIN_PASSWORD_HASH='<hash>' (single quotes: it contains $)
+docker run --rm -v "$PWD/server:/app" -w /app node:20-alpine \
+  sh -c "npm install --silent && npm run -s hash-password -- 'your-long-password'"
 
-> **Not tested here:** the Dockerfiles, `docker-compose.yml` and nginx configs were written on a machine without Docker. The worker, server, API, probes, SSE data path and client build were exercised end-to-end locally (see "Verification" below), but run `docker compose up -d --build` and watch `docker compose logs -f` on first deploy.
+docker compose up -d --build
+docker compose ps                    # wait until all are "healthy" (worker needs ~1 min)
+curl -s http://127.0.0.1:6059/ccd-status/api/health        # {"ok":true,"db":true,"worker":true,...}
+curl -sI http://127.0.0.1:6059/ccd-status/ | head -1        # HTTP/1.1 200 OK
+```
+Ports used: `6059` (gateway), `27018` (status mongo), `23750` (docker proxy), all bound to `127.0.0.1` only. Every container has `restart: unless-stopped`, a HEALTHCHECK, a memory limit and log rotation (`10m × 3`).
+
+### 3. Apply the nginx snippet
+The location block goes inside the **first** `server { }` block (`server_name 172.17.1.148`) of `/etc/nginx/sites-enabled/default`, just before that block's closing brace. **Do not touch the second, duplicate server block.**
+
+```bash
+# a) BACK UP FIRST. Keep the backup OUTSIDE sites-enabled/: nginx loads every file in that
+#    directory, so a backup left there would create yet another duplicate server block.
+sudo cp /etc/nginx/sites-enabled/default /etc/nginx/default.bak-$(date +%F)
+
+# b) look at the file and find the first server block's closing brace
+sudo nano /etc/nginx/sites-enabled/default
+#    paste the contents of deploy/host-nginx-ccd-status.conf just before that closing "}"
+
+# c) test, then reload (reload is graceful: no dropped connections)
+sudo nginx -t && sudo systemctl reload nginx
+
+# d) verify
+curl -sI http://172.17.1.148/ccd-status/ | head -1          # HTTP/1.1 200 OK
+curl -s  http://172.17.1.148/ccd-status/api/health
+curl -s  http://172.17.1.148/ccd-status/status.json | head -c 200
+```
+`nginx -t` will keep printing the existing "conflicting server name" warning for the duplicate block. That is pre-existing and harmless here; what matters is `syntax is ok` / `test is successful`.
+
+**Rollback** (if `nginx -t` fails, or anything else breaks):
+```bash
+sudo cp /etc/nginx/default.bak-<DATE> /etc/nginx/sites-enabled/default    # the backup you made in (a)
+sudo nginx -t && sudo systemctl reload nginx
+```
+If `nginx -t` fails, do not reload: the running nginx keeps serving the old config until you do. The status stack itself can be stopped independently with `docker compose down` (data survives in the named volumes).
+
+### 4. IITG webmaster
+Send them [WEBMASTER.md](WEBMASTER.md). Until it's in place the page works at `http://172.17.1.148/ccd-status/` and the **public** probes keep checking the other portals normally.
+
+> **Not tested here:** the Dockerfiles, `docker-compose.yml` and the nginx configs were written on a machine without Docker or nginx. The worker, server, API, probes (including the Host-header nginx tier) and client build were exercised end-to-end locally (see "Verification" below), but run `docker compose logs -f` on first deploy and expect to fix small things.
 
 ## Monitoring a portal that has no published port
 

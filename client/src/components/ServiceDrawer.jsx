@@ -12,7 +12,9 @@ export function humanUptime(sec) {
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
 }
 
-const PROBE_LABEL ={ container: 'Container', internal: 'Internal HTTP', public: 'Public HTTP', tls: 'TLS certificate' };
+const PROBE_LABEL = {
+  container: 'Container', internal: 'App port (internal)', nginx: 'Host nginx', public: 'Public (iitg.ac.in)', tls: 'TLS certificate',
+};
 
 function probeDetail(k, p) {
   if (k === 'container') {
