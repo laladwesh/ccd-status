@@ -1,0 +1,16 @@
+{
+  "name": "ccd-status-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "seed": "node src/seedCli.js"
+  },
+  "dependencies": {
+    "mongoose": "^8.9.0",
+    "nodemailer": "^6.9.16",
+    "p-limit": "^6.2.0"
+  },
+  "engines": { "node": ">=20" }
+}
