@@ -1,10 +1,16 @@
-# CCD System Status. Deploy with:  docker compose up -d --build
+# CCD System Status. Project name: ccd-status. Deploy with:  docker compose up -d --build
+# (or deploy/deploy.sh, which also tags images with the git SHA and waits for health).
 #
-#   gateway (nginx)  127.0.0.1:6059  -> serves client + /status.json, proxies /api to server
-#   server  (API)    bridge network only
-#   worker  (checks) network_mode: host (probes portals at 127.0.0.1:<port>)
-#   mongo            127.0.0.1:27018 (own DB; host mongod owns 27017)
-#   docker-proxy     127.0.0.1:23750 (read-only: CONTAINERS=1, everything else 0)
+#   socket-proxy  127.0.0.1:23750  read-only Docker API (CONTAINERS=1 only)
+#   worker        host network     probes portals at 127.0.0.1:<port>, writes the DB + status.json
+#   server        host network     API on 127.0.0.1:4000 (REST + SSE + admin), not published anywhere
+#   gateway       host network     nginx on 127.0.0.1:6059 -> client build, /status.json, proxies /api to server
+#
+# Database: the EXISTING host mongod (127.0.0.1:27017), dedicated database + user (see README).
+# No Mongo container. Worker, server and gateway use host networking like the other portals, because
+# the mongod listens on the host loopback, which bridge containers cannot reach.
+
+name: ccd-status
 
 x-logging: &logging
   driver: json-file
@@ -12,34 +18,25 @@ x-logging: &logging
     max-size: "10m"
     max-file: "3"
 
-services:
-  mongo:
-    image: mongo:7
-    container_name: ccd-status-mongo
-    restart: unless-stopped
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:?set MONGO_USER in .env}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?set MONGO_PASSWORD in .env}
-    command: ["mongod", "--wiredTigerCacheSizeGB", "0.25"]
-    ports:
-      - "127.0.0.1:27018:27017"
-    volumes:
-      - mongo_data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "-u", "${MONGO_USER}", "-p", "${MONGO_PASSWORD}", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping').ok"]
-      interval: 15s
-      timeout: 10s
-      retries: 6
-      start_period: 20s
-    mem_limit: 512m
-    logging: *logging
+x-build-args: &build-args
+  GIT_SHA: ${GIT_SHA:-unknown}
+  BUILD_DATE: ${BUILD_DATE:-unknown}
 
-  docker-proxy:
+x-hardening: &hardening
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 30s
+  security_opt:
+    - no-new-privileges:true
+  logging: *logging
+
+services:
+  socket-proxy:
+    <<: *hardening
     image: tecnativa/docker-socket-proxy:0.3.0
-    container_name: ccd-status-docker-proxy
-    restart: unless-stopped
+    container_name: ccd-status-socket-proxy
     environment:
-      CONTAINERS: 1   # read-only container list/inspect: the ONLY thing enabled
+      CONTAINERS: 1   # read-only container list/inspect: the ONLY API enabled
       POST: 0
       INFO: 0
       IMAGES: 0
@@ -57,85 +54,94 @@ services:
       DISTRIBUTION: 0
       EVENTS: 0
       NODES: 0
+      PING: 0
       PLUGINS: 0
       SESSION: 0
       SYSTEM: 0
+      VERSION: 0
     ports:
       - "127.0.0.1:23750:2375"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro   # mounted into the proxy only, never into the app
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+    healthcheck:
+      # exercises the socket too: /containers/json is the one endpoint the proxy allows
+      test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:2375/containers/json?limit=1' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     mem_limit: 64m
-    logging: *logging
 
   worker:
+    <<: *hardening
     build:
-      context: .
-      dockerfile: worker/Dockerfile
+      context: ./worker
+      additional_contexts:
+        shared: ./shared
+      args: *build-args
+    image: ccd-status-worker:${GIT_SHA:-local}
     container_name: ccd-status-worker
-    restart: unless-stopped
-    network_mode: host   # probes the portals on 127.0.0.1:<port>
+    network_mode: host
     env_file: .env
     environment:
-      MONGO_URL: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@127.0.0.1:27018/ccdstatus?authSource=admin
       DOCKER_PROXY_URL: http://127.0.0.1:23750
       STATUS_DIR: /data
       TZ: ${TZ:-Asia/Kolkata}
     volumes:
-      - status_data:/data
+      - ccd_status_data:/data      # status.json + heartbeat (the gateway mounts it read-only)
     depends_on:
-      mongo: { condition: service_healthy }
-      docker-proxy: { condition: service_started }
-    healthcheck:
-      test: ["CMD", "node", "src/healthcheck.js"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
+      socket-proxy: { condition: service_healthy }
+    read_only: true
+    tmpfs:
+      - /tmp
     mem_limit: 256m
-    logging: *logging
 
   server:
+    <<: *hardening
     build:
-      context: .
-      dockerfile: server/Dockerfile
+      context: ./server
+      additional_contexts:
+        shared: ./shared
+      args: *build-args
+    image: ccd-status-server:${GIT_SHA:-local}
     container_name: ccd-status-server
-    restart: unless-stopped
+    network_mode: host
     env_file: .env
     environment:
       PORT: 4000
-      MONGO_URL: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/ccdstatus?authSource=admin
+      HOST: 127.0.0.1
       TZ: ${TZ:-Asia/Kolkata}
-    depends_on:
-      mongo: { condition: service_healthy }
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp
     mem_limit: 256m
-    logging: *logging
 
   gateway:
+    <<: *hardening
     build:
-      context: .
-      dockerfile: deploy/gateway.Dockerfile
+      context: ./client
+      additional_contexts:
+        deploy: ./deploy
+      args:
+        <<: *build-args
+        BASE_PATH: /ccd-status
+        GATEWAY_PORT: "6059"
+    image: ccd-status-gateway:${GIT_SHA:-local}
     container_name: ccd-status-gateway
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:6059:80"   # host nginx proxies /ccd-status/ here
+    network_mode: host         # listens on 127.0.0.1:6059 (configured in the nginx template)
     volumes:
-      - status_data:/usr/share/nginx/status:ro   # status.json written by the worker
+      - ccd_status_data:/usr/share/nginx/status:ro   # status.json written by the worker
     depends_on:
-      - server
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/ccd-status/"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+      - server                 # started, not healthy: the page and status.json must keep working if the API is down
+    read_only: true
+    tmpfs:
+      - /tmp
     mem_limit: 64m
-    logging: *logging
 
 volumes:
-  mongo_data:
-  status_data:
+  ccd_status_data:
+    name: ccd_status_data

@@ -1,3 +1,6 @@
+// "Meet the Team" page (link only; the D-Day portal itself is not touched). Change it here.
+export const TEAM_URL = 'https://iitg.ac.in/dday/team';
+
 // Status palette (approved): operational #107C10, degraded #B7791F, down #D83B01,
 // upstream/impacted #7C2D3E, maintenance #5F6A82.
 export const STATE_META = {

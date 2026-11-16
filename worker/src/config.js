@@ -1,11 +1,12 @@
 import { DEFAULTS } from '../../shared/services.config.js';
+import { buildMongoUrl } from '../../shared/mongo-url.js';
 
 const env = process.env;
 const bool = (v) => ['1', 'true', 'yes', 'on'].includes(String(v || '').toLowerCase());
 const num = (v, d) => (Number.isFinite(Number(v)) && v !== undefined && v !== '' ? Number(v) : d);
 
 export const cfg = {
-  mongoUrl: env.MONGO_URL || 'mongodb://127.0.0.1:27018/ccdstatus',
+  mongoUrl: buildMongoUrl(env),
   dockerUrl: (env.DOCKER_PROXY_URL || 'http://127.0.0.1:23750').replace(/\/$/, ''),
   statusDir: env.STATUS_DIR || '/data',
   probeHost: env.PROBE_HOST || '127.0.0.1',

@@ -5,4 +5,5 @@ dist/
 !.env.example
 *.log
 data/
+backups/
 .DS_Store

@@ -7,9 +7,11 @@ import { createApp } from './app.js';
 assertConfig();
 const models = createModels(mongoose);
 const hub = createHub(models);
+let timer;
+let shuttingDown = false;
 
 async function connectWithRetry() {
-  for (let attempt = 1; ; attempt++) {
+  for (let attempt = 1; !shuttingDown; attempt++) {
     try {
       await mongoose.connect(cfg.mongoUrl, { serverSelectionTimeoutMS: 5000 });
       console.log('[server] connected to status database');
@@ -23,16 +25,26 @@ async function connectWithRetry() {
 
 // Start listening first so /api/health answers (503) even while the DB is still coming up.
 const app = createApp({ models, hub });
-const httpServer = app.listen(cfg.port, () => console.log(`[server] listening on :${cfg.port}`));
-await connectWithRetry();
-const timer = hub.start();
+const httpServer = app.listen(cfg.port, cfg.host, () => console.log(`[server] listening on ${cfg.host}:${cfg.port}`));
 
-const shutdown = async (sig) => {
+// Graceful shutdown: stop accepting, end SSE streams, drain, close mongoose. Hard exit after 8 s.
+async function shutdown(sig) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`[server] ${sig}, shutting down`);
   clearInterval(timer);
-  httpServer.close();
-  await mongoose.disconnect().catch(() => {});
-  process.exit(0);
-};
+  const force = setTimeout(() => { console.error('[server] forced exit'); process.exit(1); }, 8000);
+  force.unref();
+  hub.closeAll();                      // SSE responses never end on their own
+  httpServer.close(async () => {
+    await mongoose.disconnect().catch(() => {});
+    process.exit(0);
+  });
+  httpServer.closeIdleConnections?.();
+  setTimeout(() => httpServer.closeAllConnections?.(), 3000).unref();
+}
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+await connectWithRetry();
+if (!shuttingDown) timer = hub.start();

@@ -1,8 +1,11 @@
+import { buildMongoUrl } from '../../shared/mongo-url.js';
+
 const env = process.env;
 
 export const cfg = {
   port: Number(env.PORT) || 4000,
-  mongoUrl: env.MONGO_URL || 'mongodb://127.0.0.1:27018/ccdstatus',
+  host: env.HOST || '127.0.0.1', // host networking: loopback only, the gateway proxies to it
+  mongoUrl: buildMongoUrl(env),
   jwtSecret: env.JWT_SECRET,
   adminUser: env.ADMIN_USERNAME || 'admin',
   adminHash: env.ADMIN_PASSWORD_HASH,

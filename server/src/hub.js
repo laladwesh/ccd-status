@@ -64,6 +64,7 @@ export function createHub(models) {
     async broadcast() { const p = await get(); if (p && clients.size) send(p); },
     add(res) { clients.add(res); if (current) res.write(`event: status\ndata: ${JSON.stringify(current)}\n\n`); },
     remove(res) { clients.delete(res); },
+    closeAll() { for (const res of clients) { try { res.end(); } catch { /* already closed */ } } clients.clear(); },
     size: () => clients.size,
   };
 }

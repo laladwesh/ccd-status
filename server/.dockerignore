@@ -1,0 +1,14 @@
+node_modules
+.git
+.env
+.env.*
+dist
+build
+logs
+*.log
+*.test.js
+tests
+test
+*.md
+Dockerfile
+.dockerignore
