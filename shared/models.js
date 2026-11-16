@@ -14,7 +14,9 @@ export function createModels(mongoose) {
     enabled: { type: Boolean, default: true },
     container: String,
     internal: Schema.Types.Mixed,
+    nginx: Schema.Types.Mixed,
     public: Schema.Types.Mixed,
+    knownIssue: String,
     dependsOnDb: { type: Boolean, default: true },
     quality: { type: String, default: 'basic' },
     intervalSec: Number,
@@ -60,6 +62,7 @@ export function createModels(mongoose) {
     pendingCount: { type: Number, default: 0 },
     lastChange: Date,
     latencyMs: Number,
+    reason: String,
     probes: Schema.Types.Mixed,
     detail: Schema.Types.Mixed,
   }, { timestamps: true, minimize: false }));

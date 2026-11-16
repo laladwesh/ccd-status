@@ -1,18 +1,18 @@
 import { Card } from 'antd';
 import { stateMeta } from '../constants';
 
-const ORDER = ['server', 'dns', 'gateway', 'tls', 'database'];
+const ORDER = ['server', 'nginx', 'dns', 'gateway', 'tls', 'database'];
 
 export default function InfraStrip({ infra }) {
   if (!infra) return null;
   return (
     <Card size="small" title="Infrastructure" styles={{ body: { padding: 0 } }}>
-      <div className="grid grid-cols-2 sm:grid-cols-5">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
         {ORDER.filter((k) => infra[k]).map((k) => {
           const n = infra[k];
           const m = stateMeta(n.state);
           return (
-            <div key={k} className="px-4 py-3 border-t sm:border-t-0 sm:border-l first:border-l-0 first:border-t-0" style={{ borderColor: '#EDF0F5' }}>
+            <div key={k} className="px-4 py-3 border-t border-l" style={{ borderColor: '#EDF0F5' }}>
               <div className="flex items-center gap-2">
                 <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ background: m.color }} />
                 <span className="text-sm font-medium text-[#161B22]">{n.label}</span>

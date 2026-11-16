@@ -1,9 +1,9 @@
 import pLimit from 'p-limit';
 import { cfg } from './config.js';
 import { infra as infraCfg } from '../../shared/services.config.js';
-import { STATE, computeRawState, debounce, bucketIndex } from '../../shared/status.js';
+import { STATE, evaluateState, debounce, bucketIndex } from '../../shared/status.js';
 import { httpProbe } from './probes/http.js';
-import { dnsProbe, tlsProbe, mongoProbe } from './probes/net.js';
+import { dnsProbe, tlsProbe, mongoProbe, tcpProbe } from './probes/net.js';
 
 const DAY_FMT = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' });
 const dayKey = (d = new Date()) => DAY_FMT.format(d);
@@ -17,6 +17,7 @@ export function createEngine({ models, alerter, log = console }) {
   const infraStates = {};        // dns|gateway|tls|mongo -> committed state
   let upstreamDown = false;
   let dbDown = false;
+  let nginxDown = false;
   let tlsCache = { at: 0, result: null };
   let lastInfraResult = {};
 
@@ -76,23 +77,33 @@ export function createEngine({ models, alerter, log = console }) {
   async function runInfra() {
     lastRun.set('infra', Date.now());
     const tlsDue = Date.now() - tlsCache.at > infraCfg.tls.recheckMin * 60 * 1000;
-    const [dns, gateway, mongo, tls] = await Promise.all([
+    const [dns, gateway, mongo, tls, nginxTcp] = await Promise.all([
       dnsProbe(infraCfg.dnsHost),
       httpProbe(infraCfg.gatewayUrl, { timeoutMs: cfg.timeoutMs }),
       mongoProbe(infraCfg.mongo),
       tlsDue ? tlsProbe(infraCfg.tls) : Promise.resolve(tlsCache.result),
+      tcpProbe(infraCfg.nginx.host, infraCfg.nginx.port),
     ]);
     if (tlsDue) tlsCache = { at: Date.now(), result: tls };
-    lastInfraResult = { dns, gateway, mongo, tls };
+
+    // Host nginx is down if its port refuses connections, or if EVERY service whose app port is
+    // healthy fails through nginx (needs 2+ such services, so one bad route is not an nginx outage).
+    const withNginx = await ServiceState.find({ kind: 'service', 'probes.nginx': { $exists: true }, 'probes.internal.ok': true }).lean();
+    const nginxAllFail = withNginx.length >= 2 && withNginx.every((s) => s.probes.nginx.ok === false);
+    const nginx = nginxTcp.ok && !nginxAllFail
+      ? { ok: true, latencyMs: nginxTcp.latencyMs, error: null }
+      : { ok: false, latencyMs: nginxTcp.latencyMs, error: nginxTcp.ok ? 'all nginx routes failing while the apps are up' : nginxTcp.error };
+    lastInfraResult = { dns, gateway, mongo, tls, nginx };
 
     const tlsRaw = tls?.ok && tls.daysLeft >= infraCfg.tls.warnDays ? STATE.OPERATIONAL : STATE.DEGRADED;
     const raws = {
       dns: dns.ok ? STATE.OPERATIONAL : STATE.DOWN,
       gateway: gateway.ok ? STATE.OPERATIONAL : STATE.DOWN,
       mongo: mongo.ok ? STATE.OPERATIONAL : STATE.DOWN,
+      nginx: nginx.ok ? STATE.OPERATIONAL : STATE.DOWN,
       tls: tlsRaw,
     };
-    const results = { dns, gateway, mongo, tls };
+    const results = { dns, gateway, mongo, tls, nginx };
     for (const [name, raw] of Object.entries(raws)) {
       const next = await applyState(`infra:${name}`, 'infra', raw, {
         latencyMs: results[name]?.latencyMs ?? null, detail: results[name],
@@ -104,6 +115,7 @@ export function createEngine({ models, alerter, log = console }) {
     // Derived nodes. One incident + one alert for the whole upstream / database problem.
     const upNow = infraStates.dns === STATE.DOWN || infraStates.gateway === STATE.DOWN;
     const dbNow = infraStates.mongo === STATE.DOWN;
+    const nginxNow = infraStates.nginx === STATE.DOWN;
     if (upNow !== upstreamDown) {
       if (upNow) {
         await openIncident(['infra:upstream'], 'Campus network (iitg.ac.in) issue', 'iitg.ac.in DNS or the campus gateway is not reachable from the server. Portals may be healthy; public access is affected.');
@@ -123,6 +135,16 @@ export function createEngine({ models, alerter, log = console }) {
         alerter.enqueue({ kind: 'recovered', key: 'database', title: 'Shared database recovered', text: 'The host MongoDB is responding again.' });
       }
       dbDown = dbNow;
+    }
+    if (nginxNow !== nginxDown) {
+      if (nginxNow) {
+        await openIncident(['infra:nginx'], 'Server nginx issue', 'The host nginx is not serving the portals correctly (port refused, or every route fails while the apps are up). Public access is affected; the apps themselves may be running.');
+        alerter.enqueue({ kind: 'nginx', key: 'nginx', title: 'Server nginx issue', text: 'Host nginx on the server is not serving the portal routes. The apps themselves may be running.' });
+      } else {
+        await resolveIncident(['infra:nginx'], 'Host nginx is serving the portals again.');
+        alerter.enqueue({ kind: 'recovered', key: 'nginx', title: 'Host nginx recovered', text: 'Host nginx is serving the portal routes again.' });
+      }
+      nginxDown = nginxNow;
     }
   }
 
@@ -146,14 +168,20 @@ export function createEngine({ models, alerter, log = console }) {
       const url = `http://${cfg.probeHost}:${svc.internal.port}${svc.internal.path || '/'}`;
       probes.internal = await httpProbe(url, { timeoutMs: cfg.timeoutMs, expect: svc.internal.expect });
     }
+    if (svc.nginx?.path) {
+      const n = infraCfg.nginx;
+      probes.nginx = await httpProbe(`http://${n.host}:${n.port}${svc.nginx.path}`, {
+        timeoutMs: cfg.timeoutMs, expect: svc.nginx.expect, headers: { host: n.hostHeader },
+      });
+    }
     if (svc.public?.url) {
-      probes.public = await httpProbe(svc.public.url, { timeoutMs: cfg.timeoutMs, expect: svc.public.expect });
+      probes.public =await httpProbe(svc.public.url, { timeoutMs: cfg.timeoutMs, expect: svc.public.expect });
     }
     if (svc.public?.url && tlsCache.result) {
       probes.tls = { ok: tlsCache.result.ok, daysLeft: tlsCache.result.daysLeft, validTo: tlsCache.result.validTo, error: tlsCache.result.error };
     }
 
-    for (const t of ['container', 'internal', 'public']) await record(key, t, probes[t]);
+    for (const t of ['container', 'internal', 'nginx', 'public']) await record(key, t, probes[t]);
 
     if (probes.internal?.latencyMs != null && probes.internal.ok) {
       const l = latencies.get(key) || [];
@@ -161,20 +189,25 @@ export function createEngine({ models, alerter, log = console }) {
       latencies.set(key, l.slice(-30));
     }
 
-    const raw = computeRawState({
-      service: svc, probes: { container: probes.container, internal: probes.internal, public: probes.public },
-      infra: { upstreamDown, dbDown }, maintenance: maintenanceNow, latencies: latencies.get(key) || [], slowMs: cfg.slowMs,
+    const verdict = evaluateState({
+      service: svc,
+      probes: { container: probes.container, internal: probes.internal, nginx: probes.nginx, public: probes.public },
+      infra: { upstreamDown, dbDown, nginxDown }, maintenance: maintenanceNow, latencies: latencies.get(key) || [], slowMs: cfg.slowMs,
     });
-    const next = await applyState(key, 'service', raw, {
+    // The reason shown to users follows the *committed* state (the instant verdict may still be debouncing).
+    const next = debounce(await ServiceState.findOne({ key }).lean(), verdict.state);
+    const reason = next.state === verdict.state ? verdict.reason : null;
+    await applyState(key, 'service', verdict.state, {
       latencyMs: probes.internal?.latencyMs ?? probes.public?.latencyMs ?? null, probes,
+      reason: next.state === STATE.DOWN && svc.knownIssue ? svc.knownIssue : reason,
     });
     await rollup(key, next.state, probes.internal?.ok ? probes.internal.latencyMs : null, intervalSec);
 
-    if (next.changed) await onTransition(svc, next.from, next.state, probes);
+    if (next.changed) await onTransition(svc, next.from, next.state, probes, verdict.reason);
     return next.state;
   }
 
-  async function onTransition(svc, from, to, probes) {
+  async function onTransition(svc, from, to, probes, reason) {
     log.log(`[state] ${svc.key}: ${from} -> ${to}`);
     if (to === STATE.DOWN) {
       const why = probes.container?.error || probes.internal?.error || 'probe failed';
@@ -184,7 +217,14 @@ export function createEngine({ models, alerter, log = console }) {
       await resolveIncident([svc.key], `${svc.name} recovered.`);
       alerter.enqueue({ kind: 'recovered', key: svc.key, title: `RECOVERED: ${svc.name}`, text: `Now ${to}.` });
     }
-    // upstream_outage / db_impacted are covered by one infra-level incident + alert, not per service.
+    if (to === STATE.NGINX && !nginxDown) {
+      // One route failing through nginx (not a whole-nginx outage) is its own incident.
+      await openIncident([svc.key], `${svc.name} unreachable through host nginx`, `Automatic: ${reason}`);
+      alerter.enqueue({ kind: 'down', key: svc.key, title: `NGINX ROUTE: ${svc.name}`, text: reason });
+    } else if (from === STATE.NGINX && to !== STATE.MAINTENANCE) {
+      await resolveIncident([svc.key], `${svc.name} is reachable through host nginx again.`);
+    }
+    // upstream_outage / db_impacted / whole-nginx outage are covered by one infra-level incident + alert, not per service.
   }
 
   async function activeMaintenance() {
@@ -216,10 +256,11 @@ export function createEngine({ models, alerter, log = console }) {
     for (const d of docs) infraStates[d.key.replace('infra:', '')] = d.state;
     upstreamDown = infraStates.dns === STATE.DOWN || infraStates.gateway === STATE.DOWN;
     dbDown = infraStates.mongo === STATE.DOWN;
+    nginxDown = infraStates.nginx === STATE.DOWN;
   }
 
   return {
     runInfra, runServices, infraDue, loadState,
-    getInfra: () => ({ upstreamDown, dbDown, states: { ...infraStates }, last: lastInfraResult }),
+    getInfra: () => ({ upstreamDown, dbDown, nginxDown, states: { ...infraStates }, last: lastInfraResult }),
   };
 }

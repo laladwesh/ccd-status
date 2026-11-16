@@ -1,5 +1,6 @@
 import dns from 'node:dns/promises';
 import tls from 'node:tls';
+import net from 'node:net';
 import mongoose from 'mongoose';
 
 export async function dnsProbe(host, timeoutMs = 5000) {
@@ -13,6 +14,17 @@ export async function dnsProbe(host, timeoutMs = 5000) {
   } catch (e) {
     return { ok: false, latencyMs: Math.round(performance.now() - t0), error: e.code || e.message };
   }
+}
+
+export function tcpProbe(host, port, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    const t0 = performance.now();
+    const s = net.connect({ host, port, timeout: timeoutMs });
+    const done = (ok, error = null) => { s.destroy(); resolve({ ok, latencyMs: Math.round(performance.now() - t0), error }); };
+    s.on('connect', () => done(true));
+    s.on('timeout', () => done(false, 'timeout'));
+    s.on('error', (e) => done(false, e.code || e.message));
+  });
 }
 
 export function tlsProbe({ host, port = 443 }, timeoutMs = 8000) {

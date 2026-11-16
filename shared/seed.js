@@ -7,7 +7,7 @@ export async function seedServices(models) {
     const { key, ...fields } = s;
     await Service.updateOne(
       { key },
-      { $set: { ...fields, internal: s.internal ?? null, public: s.public ?? null }, $setOnInsert: { enabled: true } },
+      { $set: { ...fields, internal: s.internal ?? null, nginx: s.nginx ?? null, public: s.public ?? null, knownIssue: s.knownIssue ?? null }, $setOnInsert: { enabled: true } },
       { upsert: true },
     );
   }

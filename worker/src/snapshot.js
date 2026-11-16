@@ -5,7 +5,7 @@ import path from 'node:path';
 import { computeOverall, p95FromBuckets } from '../../shared/status.js';
 import { cfg } from './config.js';
 
-const PUBLIC_KEYS = ['container', 'internal', 'public', 'tls'];
+const PUBLIC_KEYS = ['container', 'internal', 'nginx', 'public', 'tls'];
 const DAY_MS = 86400000;
 
 export async function buildSnapshot({ models, engine }) {
@@ -42,16 +42,17 @@ export async function buildSnapshot({ models, engine }) {
     return {
       key: s.key, name: s.name, group: s.group, order: s.order, quality: s.quality,
       hasPublic: !!s.public?.url, publicUrl: s.public?.url || null,
-      state: st?.state || 'unknown', latencyMs: st?.latencyMs ?? null, lastChange: st?.lastChange || null,
+      state: st?.state || 'unknown', reason: st?.reason || null, latencyMs: st?.latencyMs ?? null, lastChange: st?.lastChange || null,
       probes, uptimePct: up + down ? Math.round((up / (up + down)) * 10000) / 100 : null, days,
     };
   });
 
   const infra = engine.getInfra();
   const is = (n) => stateByKey.get(`infra:${n}`);
-  const dns = is('dns'); const gateway = is('gateway'); const mongo = is('mongo'); const tls = is('tls');
+  const dns = is('dns'); const gateway = is('gateway'); const mongo = is('mongo'); const tls = is('tls'); const nginxN = is('nginx');
   const infraOut = {
     server: { label: 'Server 172.17.1.148', state: 'operational', detail: 'monitoring worker alive' },
+    nginx: { label: 'Host nginx', state: nginxN?.state || 'unknown', detail: nginxN?.detail?.error || null },
     dns: { label: 'iitg.ac.in DNS', state: dns?.state || 'unknown', detail: dns?.detail?.error || dns?.detail?.detail || null },
     gateway: { label: 'Campus gateway', state: gateway?.state || 'unknown', detail: gateway?.detail?.error || (gateway?.detail?.statusCode ? `HTTP ${gateway.detail.statusCode}` : null), latencyMs: gateway?.latencyMs ?? null },
     tls: { label: 'TLS certificate', state: tls?.state || 'unknown', detail: tls?.detail?.daysLeft != null ? `${tls.detail.daysLeft} days left` : tls?.detail?.error || null, daysLeft: tls?.detail?.daysLeft ?? null },
@@ -66,7 +67,7 @@ export async function buildSnapshot({ models, engine }) {
 
   return {
     generatedAt: now.toISOString(),
-    overall: computeOverall(out, { upstreamDown: infra.upstreamDown, dbDown: infra.dbDown }),
+    overall: computeOverall(out, { upstreamDown: infra.upstreamDown, nginxDown: infra.nginxDown, dbDown: infra.dbDown }),
     infra: infraOut,
     services: out,
     incidents: { active: active.map(slim), recent: recent.map(slim) },

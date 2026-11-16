@@ -103,7 +103,7 @@ export function adminRouter({ models, hub }) {
     const byKey = new Map(states.map((s) => [s.key, s]));
     res.json(list.map((s) => ({
       key: s.key, name: s.name, group: s.group, enabled: s.enabled, container: s.container, quality: s.quality,
-      internal: s.internal, public: s.public, state: byKey.get(s.key)?.state || 'unknown', lastChange: byKey.get(s.key)?.lastChange || null,
+      internal: s.internal, nginx: s.nginx, public: s.public, state: byKey.get(s.key)?.state || 'unknown', lastChange: byKey.get(s.key)?.lastChange || null,
     })));
   }));
 

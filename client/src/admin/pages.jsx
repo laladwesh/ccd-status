@@ -178,7 +178,7 @@ export function ServicesPage() {
           { title: 'State', dataIndex: 'state', width: 200, render: (s) => <StatusTag state={s} short /> },
           { title: 'Container', dataIndex: 'container', width: 190 },
           { title: 'Health quality', dataIndex: 'quality', width: 120, render: (q) => <Tag color={q === 'health' ? '#107C10' : '#9CA0AE'}>{q === 'health' ? 'health route' : 'basic'}</Tag> },
-          { title: 'Probes', width: 150, render: (_, r) => [r.internal && 'internal', r.public && 'public', 'container'].filter(Boolean).join(' · ') },
+          { title: 'Probes', width: 150, render: (_, r) => ['container', r.internal && 'app', r.nginx && 'nginx', r.public && 'public'].filter(Boolean).join(' · ') },
           { title: 'Enabled', dataIndex: 'enabled', width: 90, render: (e, r) => <Switch checked={e} onChange={(v) => toggle(r.key, v)} /> },
           { title: '', width: 120, render: (_, r) => <Button size="small" loading={busy === r.key} disabled={!r.enabled} onClick={() => checkNow(r.key)}>Check now</Button> },
         ]}

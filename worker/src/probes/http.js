@@ -1,6 +1,6 @@
 // GET-only HTTP probe. Never follows redirects (a 302 to a login page is "up"),
 // never sends credentials, reads headers only.
-export async function httpProbe(url, { timeoutMs = 10000, expect = 'ok' } = {}) {
+export async function httpProbe(url, { timeoutMs = 10000, expect = 'ok', headers = {} } = {}) {
   const t0 = performance.now();
   const elapsed = () => Math.round(performance.now() - t0);
   try {
@@ -8,7 +8,7 @@ export async function httpProbe(url, { timeoutMs = 10000, expect = 'ok' } = {}) 
       method: 'GET',
       redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs),
-      headers: { 'user-agent': 'ccd-status-probe/1.0', accept: '*/*' },
+      headers: { 'user-agent': 'ccd-status-probe/1.0', accept: '*/*', ...headers },
     });
     const latencyMs = elapsed();
     try { await res.body?.cancel(); } catch { /* ignore */ }

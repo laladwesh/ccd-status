@@ -2,7 +2,8 @@ import StatusTag from './StatusTag';
 import UptimeBar from './UptimeBar';
 
 export default function ServiceRow({ service, onOpen }) {
-  const { name, state, latencyMs, uptimePct, days } = service;
+  const { name, state, latencyMs, uptimePct, days, reason } = service;
+  const showReason = reason && state !== 'operational' && state !== 'unknown';
   return (
     <button
       type="button"
@@ -17,6 +18,7 @@ export default function ServiceRow({ service, onOpen }) {
           <StatusTag state={state} short />
         </span>
       </div>
+      {showReason && <p className="text-xs mb-2" style={{ color: '#7C2D3E' }}>{reason}</p>}
       <UptimeBar days={days} />
       <div className="flex justify-between text-xs text-[#666B72] mt-1">
         <span>90 days ago</span>
