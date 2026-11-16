@@ -26,7 +26,11 @@ LABEL org.opencontainers.image.title="ccd-status-gateway" \
 ENV BASE_PATH=${BASE_PATH} \
     GATEWAY_PORT=${GATEWAY_PORT}
 USER root
-RUN mkdir -p /usr/share/nginx/status "/usr/share/nginx/html${BASE_PATH}" && chown -R 101:101 /usr/share/nginx/status
+# worker_processes: with host networking "auto" spawned one nginx worker per CPU; this is a tiny static gateway.
+RUN mkdir -p /usr/share/nginx/status "/usr/share/nginx/html${BASE_PATH}" \
+ && chown -R 101:101 /usr/share/nginx/status \
+ && sed -i 's/^worker_processes.*/worker_processes 2;/' /etc/nginx/nginx.conf \
+ && grep -q '^worker_processes 2;' /etc/nginx/nginx.conf
 USER 101
 COPY --from=build /tmp/default.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist/ /usr/share/nginx/html${BASE_PATH}/

@@ -84,10 +84,11 @@ export const services = [
   },
   // ---- Training ----
   {
-    // Confirmed: nginx /training -> 127.0.0.1:5001 (ccd-app).
+    // Confirmed: nginx /training -> 127.0.0.1:5001 (ccd-app). The running app is served under /training
+    // (the old /test route returns 404 on the live container). Default expect 'ok' = HTTP 200-399.
     key: 'training-app', name: 'Training Portal – App (5001)', group: 'Training', order: 30,
     container: 'ccd-app', dependsOnDb: true, quality: 'basic',
-    internal: { port: 5001, path: '/test' },
+    internal: { port: 5001, path: '/training/' },
     nginx: { path: '/training/' },
     public: { url: 'https://iitg.ac.in/training/' },
   },

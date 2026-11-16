@@ -63,18 +63,41 @@ services:
       - "127.0.0.1:23750:2375"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro   # mounted into the proxy only, never into the app
-    read_only: true
+    # NOT read_only: haproxy renders /usr/local/etc/haproxy/haproxy.cfg at start-up. The other hardening
+    # (no-new-privileges, :ro socket, CONTAINERS=1 only, loopback-only port) still applies.
     tmpfs:
       - /run
       - /tmp
     healthcheck:
-      # exercises the socket too: /containers/json is the one endpoint the proxy allows
+      # Works with PING=0: it asks for /containers/json, the one endpoint the proxy allows (CONTAINERS=1),
+      # so it also proves the proxy can reach the Docker socket.
       test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:2375/containers/json?limit=1' || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 10s
     mem_limit: 64m
+
+  # One-shot: makes the shared status volume writable by the worker (uid 1000) on a fresh deploy, so no manual
+  # chown is ever needed. Reuses the worker image, runs as root, chowns /data and exits.
+  init-perms:
+    image: ccd-status-worker:${GIT_SHA:-local}
+    pull_policy: never           # built by the worker service in the same `up --build`
+    container_name: ccd-status-init-perms
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command: ["chown -R 1000:1000 /data && chmod 755 /data"]
+    volumes:
+      - ccd_status_data:/data
+    restart: "no"
+    init: true
+    healthcheck:
+      disable: true              # one-shot: do not inherit the worker image's HEALTHCHECK
+    network_mode: none
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
+    mem_limit: 16m
 
   worker:
     <<: *hardening
@@ -94,6 +117,7 @@ services:
     volumes:
       - ccd_status_data:/data      # status.json + heartbeat (server and gateway mount it read-only)
     depends_on:
+      init-perms: { condition: service_completed_successfully }
       socket-proxy: { condition: service_healthy }   # NOT on Mongo: the worker must run while the DB is down
     read_only: true
     tmpfs:
