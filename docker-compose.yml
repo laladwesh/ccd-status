@@ -1,14 +1,14 @@
-# CCD System Status. Project name: ccd-status. Deploy with:  docker compose up -d --build
-# (or deploy/deploy.sh, which also tags images with the git SHA and waits for health).
+# CCD System Status. Project name: ccd-status. Deploy by hand:  docker compose up -d --build
 #
 #   socket-proxy  127.0.0.1:23750  read-only Docker API (CONTAINERS=1 only)
-#   worker        host network     probes portals at 127.0.0.1:<port>, writes the DB + status.json
-#   server        host network     API on 127.0.0.1:4000 (REST + SSE + admin), not published anywhere
-#   gateway       host network     nginx on 127.0.0.1:6059 -> client build, /status.json, proxies /api to server
+#   worker        host network     probes portals at 127.0.0.1:<port>; status logic runs in memory; writes status.json
+#   server        host network     API on 127.0.0.1:6060 only (REST + SSE + admin); serves status.json if Mongo is down
+#   gateway       host network     nginx on 127.0.0.1:6059 only -> client build, /status.json, proxies /api/ to 127.0.0.1:6060
 #
-# Database: the EXISTING host mongod (127.0.0.1:27017), dedicated database + user (see README).
-# No Mongo container. Worker, server and gateway use host networking like the other portals, because
-# the mongod listens on the host loopback, which bridge containers cannot reach.
+# Database: the EXISTING host mongod, database "ccd-status" (MONGO_URI in .env). No Mongo container.
+# Worker, server and gateway use host networking like the other CCD portals, because the mongod listens on the
+# host loopback, which bridge containers cannot reach. Host mongod down != status page down: the worker keeps
+# probing from memory, buffers results (~1 h), and writes status.json every cycle; healthchecks never depend on Mongo.
 
 name: ccd-status
 
@@ -92,9 +92,9 @@ services:
       STATUS_DIR: /data
       TZ: ${TZ:-Asia/Kolkata}
     volumes:
-      - ccd_status_data:/data      # status.json + heartbeat (the gateway mounts it read-only)
+      - ccd_status_data:/data      # status.json + heartbeat (server and gateway mount it read-only)
     depends_on:
-      socket-proxy: { condition: service_healthy }
+      socket-proxy: { condition: service_healthy }   # NOT on Mongo: the worker must run while the DB is down
     read_only: true
     tmpfs:
       - /tmp
@@ -112,9 +112,12 @@ services:
     network_mode: host
     env_file: .env
     environment:
-      PORT: 4000
-      HOST: 127.0.0.1
+      PORT: 6060
+      HOST: 127.0.0.1              # loopback only, never 0.0.0.0
+      STATUS_DIR: /data
       TZ: ${TZ:-Asia/Kolkata}
+    volumes:
+      - ccd_status_data:/data:ro   # /api/status serves status.json when Mongo is unavailable
     read_only: true
     tmpfs:
       - /tmp
@@ -132,7 +135,7 @@ services:
         GATEWAY_PORT: "6059"
     image: ccd-status-gateway:${GIT_SHA:-local}
     container_name: ccd-status-gateway
-    network_mode: host         # listens on 127.0.0.1:6059 (configured in the nginx template)
+    network_mode: host         # listens on 127.0.0.1:6059 only (set in the nginx template)
     volumes:
       - ccd_status_data:/usr/share/nginx/status:ro   # status.json written by the worker
     depends_on:

@@ -19,7 +19,7 @@ WORKDIR /app/worker
 COPY --from=deps --chown=node:node /app/worker/node_modules ./node_modules
 COPY --chown=node:node package.json ./
 COPY --chown=node:node src ./src
-COPY --from=shared --chown=node:node package.json services.config.js status.js models.js seed.js mongo-url.js /app/shared/
+COPY --from=shared --chown=node:node package.json services.config.js status.js models.js seed.js snapshot.js /app/shared/
 # status.json + heartbeat volume: create it owned by the non-root user so the named volume inherits that.
 RUN mkdir -p /data && chown node:node /data
 USER node

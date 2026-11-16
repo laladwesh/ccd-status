@@ -13,16 +13,18 @@ LABEL org.opencontainers.image.title="ccd-status-server" \
       org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 ENV NODE_ENV=production \
-    PORT=4000 \
-    HOST=127.0.0.1
+    PORT=6060 \
+    HOST=127.0.0.1 \
+    STATUS_DIR=/data
 WORKDIR /app/server
 COPY --from=deps --chown=node:node /app/server/node_modules ./node_modules
 COPY --chown=node:node package.json ./
 COPY --chown=node:node src ./src
 COPY --chown=node:node scripts ./scripts
-COPY --from=shared --chown=node:node package.json status.js models.js mongo-url.js /app/shared/
+COPY --from=shared --chown=node:node package.json status.js models.js /app/shared/
 USER node
-# Runs on the host network, bound to 127.0.0.1 only. 503 while the database is unreachable.
+# Host network, bound to 127.0.0.1:6060 only. /api/health is 200 whenever the process can serve: it does NOT
+# depend on MongoDB, so a database outage never makes Docker restart the status page.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:4000/api/health >/dev/null || exit 1
+  CMD wget -qO- http://127.0.0.1:6060/api/health >/dev/null || exit 1
 CMD ["node", "src/index.js"]
