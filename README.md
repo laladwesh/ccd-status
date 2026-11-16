@@ -8,7 +8,7 @@ Served at `/ccd-status/` (host nginx on `<SERVER_IP>` → gateway on `127.0.0.1:
 
 ## Architecture
 
-Four containers, compose project `ccd-status`, all named `ccd-status-*`. Server, worker and gateway use `network_mode: host` like the other CCD portals.
+Four long-running containers plus a one-shot `init-perms`; compose project `ccd-status`, all named `ccd-status-*`. Server, worker and gateway use `network_mode: host` like the other CCD portals.
 
 ```
  browser ─► (IITG proxy) ─► host nginx :80 ─► gateway  127.0.0.1:6059   (nginx, serves client + status.json)
@@ -24,7 +24,8 @@ Four containers, compose project `ccd-status`, all named `ccd-status-*`. Server,
 
 | Container | Network | Listens on | Notes |
 |---|---|---|---|
-| `ccd-status-socket-proxy` | bridge | `127.0.0.1:23750` | `tecnativa/docker-socket-proxy`, `CONTAINERS=1`, everything else `0`, `docker.sock` mounted `:ro`, `read_only` |
+| `ccd-status-socket-proxy` | bridge | `127.0.0.1:23750` | `tecnativa/docker-socket-proxy`, `CONTAINERS=1`, everything else `0`, `docker.sock` mounted `:ro` (root filesystem writable: haproxy renders its config at start-up) |
+| `ccd-status-init-perms` | none | none | one-shot: chowns the shared status volume for the worker (uid 1000), then exits |
 | `ccd-status-worker` | host | none | probes + status logic + `status.json` + DB write-behind |
 | `ccd-status-server` | host | `127.0.0.1:6060` only | REST, SSE, admin. Never `0.0.0.0` |
 | `ccd-status-gateway` | host | `127.0.0.1:6059` only | nginx-unprivileged |
@@ -105,11 +106,19 @@ cd <DEPLOY_DIR>
 cp .env.example .env && chmod 600 .env
 nano .env        # MONGO_URI, ADMIN_PASSWORD_HASH, JWT_SECRET (see below); alerts stay off by default
 ```
-**Admin password hash (one command).** Build the server image first (`docker compose build server`), then:
+**Admin password hash (one command: generates it and writes it, correctly escaped, into `.env`).** Build the server image first (`docker compose build server`), then:
 ```bash
-docker compose run --rm --no-deps --entrypoint node server scripts/hash-password.js 'your-long-password'
+H=$(docker compose run --rm --no-deps --entrypoint node server scripts/hash-password.js 'your-long-password' | tail -n 1) \
+  && sed -i "s|^ADMIN_PASSWORD_HASH=.*|ADMIN_PASSWORD_HASH=${H//\$/\$\$}|" .env \
+  && grep '^ADMIN_PASSWORD_HASH=\$\$2' .env | cut -c1-40      # should print ADMIN_PASSWORD_HASH=$$2a$$12$$...
 ```
-Paste the output into `.env` as `ADMIN_PASSWORD_HASH='<hash>'` (**single quotes**, it contains `$`). The password must be 10+ characters and must not contain a single quote. `JWT_SECRET`: `openssl rand -hex 32`.
+The password must be 10+ characters and must not contain a single quote. **Do not paste the raw hash and do not quote it**: see "Known deploy gotchas" below. `JWT_SECRET`: `openssl rand -hex 32`.
+
+#### Known deploy gotchas
+- **`$` in `ADMIN_PASSWORD_HASH`.** A bcrypt hash looks like `$2a$12$...`. Docker Compose interpolates `$` in `.env`, so **every `$` must be written as `$$` and the value must not be quoted**: `ADMIN_PASSWORD_HASH=$$2a$$12$$...`. Quoting it, or leaving single `$`, silently corrupts the hash and admin login fails with "invalid credentials". The one-liner above does this for you. (Compose turns `$$` back into `$` inside the container.)
+- **Status volume permissions.** A one-shot `init-perms` container (the worker image, run as root) chowns the shared `ccd_status_data` volume to uid 1000 before the worker starts, so a fresh deploy needs no manual `chown`. It shows as `Exited (0)` in `docker compose ps`: that is normal.
+- **Socket proxy is not `read_only`.** haproxy writes its config at start-up, so only that one container has a writable root filesystem (the Docker socket is still mounted `:ro`, only `CONTAINERS=1` is enabled, and it listens on loopback only).
+- **Training portal probe path.** The training app is served under `/training/` on its port (the app-port, nginx and public probes all use `/training/`).
 
 ### 4. Build and start
 ```bash
@@ -249,7 +258,7 @@ Collections in `ccd-status`: `checks` (TTL 30 d), `dailyrollups` (TTL 365 d, dri
 - `cd client && npm run build`: builds with `BASE_PATH` configurable; no external URLs (Geist is bundled; no CDN/Google Fonts).
 - End-to-end smoke runs (in-memory MongoDB, fake portal + fake host nginx, real worker + real server), including **stopping MongoDB mid-run**: `status.json` kept updating and showed the database state, `/api/status` kept serving, history returned 503 `DB_UNAVAILABLE`, `/api/health` stayed 200, no process crashed, and after Mongo came back the buffered checks (with timestamps from inside the outage) were flushed and history worked again.
 - `docker-compose.yml` parses (all services as specified); `gateway.nginx.conf` template renders with no leftover placeholders. There are no deploy or backup scripts and no cron: everything is the manual steps above.
-- **Not tested here (no Docker or nginx on the dev machine):** the Dockerfiles/compose build, the container healthchecks, `read_only` + tmpfs behaviour, the socket-proxy image (`read_only` and the `wget` healthcheck assumptions), the nginx configs. Watch `docker compose logs -f` on first deploy. If the socket-proxy refuses to start with `read_only: true`, remove that one line.
+- **Not tested here (no Docker or nginx on the dev machine):** the Dockerfiles/compose build, the container healthchecks, `read_only` + tmpfs behaviour, the nginx configs. (Fixes from the first real deploy are described under "Known deploy gotchas".) Watch `docker compose logs -f` on first deploy.
 
 ## Optional Phase 3 (not built)
 A status page on `<SERVER_IP>` cannot report that `<SERVER_IP>` itself is down. Suggested: a tiny external watchdog outside campus, a GitHub Actions cron (every 5 min) that GETs the public `https://iitg.ac.in/<app>/` URLs and `https://iitg.ac.in/ccd-status/api/health`, and alerts via Telegram/email on failure (or a free hosted uptime pinger). It tests the same public path outside users see.
