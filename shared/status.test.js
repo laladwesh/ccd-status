@@ -101,3 +101,57 @@ test('percentile helpers', () => {
   assert.equal(percentile([], 95), null);
   assert.equal(p95FromBuckets({ 0: 90, 3: 10 }), 500);
 });
+
+// ---------- nginx tier (app port -> host nginx -> public) ----------
+import { evaluateState, REASON } from './status.js';
+
+test('nginx tier: app OK but host nginx path fails => nginx_issue (even if public also fails)', () => {
+  const probes = { internal: ok, nginx: bad, public: bad };
+  const r = evaluateState({ service: svc, probes, infra: { upstreamDown: false } });
+  assert.equal(r.state, STATE.NGINX);
+  assert.equal(r.reason, REASON.nginx);
+  assert.equal(computeRawState({ service: svc, probes, infra: { upstreamDown: true } }), STATE.NGINX);
+});
+
+test('nginx tier: app + nginx OK, public fails, iitg.ac.in down => upstream_outage', () => {
+  const r = evaluateState({ service: svc, probes: { internal: ok, nginx: ok, public: bad }, infra: { upstreamDown: true } });
+  assert.equal(r.state, STATE.UPSTREAM);
+});
+
+test('nginx tier: app + nginx OK, public fails, iitg.ac.in OK => degraded "IITG proxy route issue"', () => {
+  const r = evaluateState({ service: svc, probes: { internal: ok, nginx: ok, public: bad }, infra: { upstreamDown: false } });
+  assert.equal(r.state, STATE.DEGRADED);
+  assert.match(r.reason, /IITG proxy route issue for this path/);
+});
+
+test('nginx tier: a failing app port is DOWN, not an nginx issue (nginx would 502 too)', () => {
+  assert.equal(computeRawState({ service: svc, probes: { internal: bad, nginx: bad, public: bad } }), STATE.DOWN);
+});
+
+test('nginx tier: all three tiers OK => operational; services without nginx probe are unaffected', () => {
+  assert.equal(computeRawState({ service: svc, probes: { internal: ok, nginx: ok, public: ok } }), STATE.OPERATIONAL);
+  assert.equal(computeRawState({ service: svc, probes: { internal: ok } }), STATE.OPERATIONAL);
+});
+
+test('nginx tier: debounce applies (3 failures to enter nginx_issue, 2 successes to leave)', () => {
+  let st = { state: STATE.OPERATIONAL };
+  st = debounce(st, STATE.NGINX); st = debounce(st, STATE.NGINX);
+  assert.equal(st.state, STATE.OPERATIONAL);
+  st = debounce(st, STATE.NGINX);
+  assert.equal(st.state, STATE.NGINX);
+  st = debounce(st, STATE.OPERATIONAL); assert.equal(st.state, STATE.NGINX);
+  st = debounce(st, STATE.OPERATIONAL); assert.equal(st.state, STATE.OPERATIONAL);
+});
+
+test('overall: one nginx banner when host nginx is down; upstream outranks nginx outranks database', () => {
+  const s = [{ state: STATE.NGINX }, { state: STATE.NGINX }];
+  assert.equal(computeOverall(s, { nginxDown: true }).status, 'nginx');
+  assert.equal(computeOverall(s, { nginxDown: true, dbDown: true }).status, 'nginx');
+  assert.equal(computeOverall(s, { nginxDown: true, upstreamDown: true }).status, 'upstream');
+});
+
+test('industry-style container-only service: restart loop is DOWN with the container reason', () => {
+  const r = evaluateState({ service: svc, probes: { container: { ok: false, error: 'restart loop (exit 254)' } } });
+  assert.equal(r.state, STATE.DOWN);
+  assert.match(r.reason, /restart loop/);
+});

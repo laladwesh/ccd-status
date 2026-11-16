@@ -22,6 +22,7 @@ export const DEFAULTS = {
 };
 
 export const PUBLIC_ORIGIN = 'https://iitg.ac.in';
+export const SERVER_IP = '172.17.1.148';
 
 // "Upstream" node: if DNS or the iitg.ac.in homepage fails, public failures are
 // reported as one campus/upstream issue instead of N broken services.
@@ -31,6 +32,9 @@ export const infra = {
   tls: { host: 'iitg.ac.in', port: 443, warnDays: 14, recheckMin: 30 },
   // Shared host mongod: unauthenticated {hello:1}, no credentials.
   mongo: { host: '127.0.0.1', port: 27017, timeoutMs: 3000 },
+  // Host nginx on this server (first server{} block, server_name = SERVER_IP). The Host header is
+  // pinned so requests to 127.0.0.1 land on that server block.
+  nginx: { host: '127.0.0.1', port: 80, hostHeader: SERVER_IP },
 };
 
 export const groups = ['Placement', 'Internship', 'Training', 'Industry', 'PhD', 'Others'];

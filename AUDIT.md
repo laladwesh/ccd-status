@@ -71,7 +71,7 @@ Legend: HN = `network_mode: host`. "Shell route" = an unauthenticated route that
 - **Stack:** CRA client (React 19, Tailwind 3), Express 4, Mongoose 8, Node 20. Backend serves the built frontend. Frontend uses Microsoft login (`VITE_MICROSOFT_*`).
 - **Runtime:** **not HN**; publishes `5001:5001`. No base path (`/api/...`, `/test`). Uploads bind mount `./backend/uploads/pdfs`.
 - **Public URL:** none found **(unverified)**; only a `5001` published port, so possibly reached through an IITG proxy.
-- **Health:** none. **`GET /test`** returns `API is running...` (`app.js:35`, no DB). Host probe: `http://172.17.1.18:5001/test`.
+- **Health:** none. **`GET /test`** returns `API is running...` (`app.js:35`, no DB). Host probe: `http://172.17.1.148:5001/test`.
 - **Dependencies:** `MONGODB_URI`/`MONGO_URI`, `JWT_SECRET`, `OUTLOOK_EMAIL/PASSWORD`, `FRONTEND_URL`, `PROD_FRONTEND_URL`.
 
 ### 1.8 ccdIndustry → container `industry_backend` (identity HIGH, current state UNKNOWN)
@@ -163,13 +163,13 @@ Probe targets assume the worker reaches the host as `HOST` (see E). `Container` 
 | # | Service | Group | Container | Internal probe (host port + path) | Public URL | Health path | Expect | Health quality |
 |---|---|---|---|---|---|---|---|---|
 | 1 | Placement Portal | Placement | `placement23` | `HOST:5000` `/placements/api/` | `https://iitg.ac.in/placements/` | `/placements/api/` | 200 JSON | Cheap (no DB) |
-| 2 | Placement frontend (legacy?) | Placement | `placement_portal_frontend` | `172.17.1.18:3012` `/` | none known | `/` | 200 | Static; confirm if needed |
+| 2 | Placement frontend (legacy?) | Placement | `placement_portal_frontend` | `172.17.1.148:3012` `/` | none known | `/` | 200 | Static; confirm if needed |
 | 3 | D-Day Portal | Placement | `dday2026-app` | `HOST:5005` `/dday/api/health` | `https://iitg.ac.in/dday/` | `/dday/api/health` | 200 `{ok:true}` | **Real health route** |
 | 4 | Intern Portal (2024) | Internship | `intern24test` | `HOST:11034` `/intern/api/` | `https://iitg.ac.in/intern/` | `/intern/api/` | 200 JSON | Cheap (no DB) |
 | 5 | Intern 2026 | Internship | `intern2026-app` | `HOST:5009` `/intern-2026/api/health` | `https://iitg.ac.in/intern-2026/` | `/intern-2026/api/health` | 200 | **Real health route** |
-| 6 | Training Portal | Training | `ccd-app` | `172.17.1.18:5001` `/test` | unknown | `/test` | 200 text | Cheap (no DB) |
-| 7 | Training (old frontend) | Training | `frontend` | `172.17.1.18:3000` `/` | unknown | `/` | 200 | nginx static; likely stale |
-| 8 | Training (old backend) | Training | `backend` | `172.17.1.18:5004` path **unknown** | unknown | ? | ? | Unknown; need the logs |
+| 6 | Training Portal | Training | `ccd-app` | `172.17.1.148:5001` `/test` | unknown | `/test` | 200 text | Cheap (no DB) |
+| 7 | Training (old frontend) | Training | `frontend` | `172.17.1.148:3000` `/` | unknown | `/` | 200 | nginx static; likely stale |
+| 8 | Training (old backend) | Training | `backend` | `172.17.1.148:5004` path **unknown** | unknown | ? | ? | Unknown; need the logs |
 | 9 | Industry Portal | Industry | `industry_backend` | `HOST:8081` (or 5002) path **unknown** | unknown | ? | ? | **Currently crash-looping** |
 | 10 | PhD Placement | PhD | `phdplacement-app` | `HOST:7002` `/phdplacement/` | `https://iitg.ac.in/phdplacement/` | `/phdplacement/` | 200 | SSR shell; verify |
 | 11 | CCD App Backend | Others | `ccd-backend` | `HOST:6001` `/ccd-app/policies` | `https://iitg.ac.in/ccd-app/` (unverified) | `/ccd-app/policies` | 200 | Verify no DB access |
@@ -198,7 +198,7 @@ The `.HostConfig.NetworkMode` addition above matters: it confirms my host-networ
 
 ### C.2 Questions
 1. Which repo is live for `/intern/`: `latest-intern-portal` or `Intern-Portal-2023`?
-2. Where does the public reverse proxy (`iitg.ac.in/<path>` → `172.17.1.18:<port>`) live: nginx on this box, or an IITG-managed machine? If it is IITG's, our "public" probe measures that proxy, and we cannot see its config.
+2. Where does the public reverse proxy (`iitg.ac.in/<path>` → `172.17.1.148:<port>`) live: nginx on this box, or an IITG-managed machine? If it is IITG's, our "public" probe measures that proxy, and we cannot see its config.
 3. Are `oa-app`, `industry-payment-app` and `resume-builder` deployed anywhere? If so, where?
 4. Is `placement_portal_frontend` still used (3012), and are the old `frontend`/`backend` (3000/5004) still used?
 5. What is the public URL for the training portal (`ccd-app`) and for `industry_backend`?
@@ -238,4 +238,4 @@ The `.HostConfig.NetworkMode` addition above matters: it confirms my host-networ
 7. **Mongoose version:** for the status app I will use Mongoose 8, Express 4 (matching live-placement), and Vite + React 18 (the brief says Vite). I will copy the Placement theme files into `client/src/theme`.
 
 ## 7. Proposed Phase 3 (not to be built unless you ask)
-A status page on `172.17.1.18` cannot report that `172.17.1.18` is down. Propose a tiny external watchdog outside campus: a GitHub Actions cron (every 5 min) that GETs the public `https://iitg.ac.in/<app>/` URLs and the status page `/api/health`, and sends a Telegram/email alert on failure; or a free hosted uptime pinger. Note that GitHub runners are outside the campus network, so they test the *public* path, which is exactly what users outside campus see.
+A status page on `172.17.1.148` cannot report that `172.17.1.148` is down. Propose a tiny external watchdog outside campus: a GitHub Actions cron (every 5 min) that GETs the public `https://iitg.ac.in/<app>/` URLs and the status page `/api/health`, and sends a Telegram/email alert on failure; or a free hosted uptime pinger. Note that GitHub runners are outside the campus network, so they test the *public* path, which is exactly what users outside campus see.

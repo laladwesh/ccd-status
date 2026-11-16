@@ -2,14 +2,14 @@
 
 Status page for the IIT Guwahati Centre for Career Development portals. It tells **container**, **database**, **upstream (campus network / iitg.ac.in)** and **application** problems apart, so one campus outage does not show up as a dozen broken services.
 
-Served at `/ccd-status/` (host nginx on `172.17.1.18` → gateway container on `127.0.0.1:6059`). Later the IITG webmaster proxies `https://iitg.ac.in/ccd-status/` → `http://172.17.1.18/ccd-status/`. The build is path-stable (`/ccd-status/`), so it works in both places unchanged.
+Served at `/ccd-status/` (host nginx on `172.17.1.148` → gateway container on `127.0.0.1:6059`). Later the IITG webmaster proxies `https://iitg.ac.in/ccd-status/` → `http://172.17.1.148/ccd-status/`. The build is path-stable (`/ccd-status/`), so it works in both places unchanged.
 
 > See [AUDIT.md](AUDIT.md) for the Phase 1 findings this is based on.
 
 ## Architecture
 
 ```
-                    ┌────────────── 172.17.1.18 ──────────────┐
+                    ┌────────────── 172.17.1.148 ──────────────┐
  browser ─► host nginx ─► gateway (nginx) 127.0.0.1:6059
                            ├─ /ccd-status/          static React build
                            ├─ /ccd-status/status.json   written by worker (works if API is down)
@@ -70,7 +70,7 @@ cd shared && npm test
 
 The portals aren't running on your laptop, so locally most services show DOWN. That is expected.
 
-## Deploy on 172.17.1.18
+## Deploy on 172.17.1.148
 
 ```bash
 git clone <repo> ccd-status && cd ccd-status
@@ -81,10 +81,10 @@ docker compose up -d --build
 docker compose ps                            # all should become "healthy"
 ```
 
-1. **Host nginx.** Add the `location /ccd-status/` block from [deploy/host-nginx-ccd-status.conf](deploy/host-nginx-ccd-status.conf) inside the existing `server { listen 80 ... }` that serves 172.17.1.18, then `sudo nginx -t && sudo systemctl reload nginx`.
+1. **Host nginx.** Add the `location /ccd-status/` block from [deploy/host-nginx-ccd-status.conf](deploy/host-nginx-ccd-status.conf) inside the existing `server { listen 80 ... }` that serves 172.17.1.148, then `sudo nginx -t && sudo systemctl reload nginx`.
    **This snippet is provisional**: the `nginx -T` output was not available when it was written. Compare it with the real config (which server block, any `include` structure) before applying.
-2. **Check** `curl -s http://127.0.0.1:6059/ccd-status/api/health` and open `http://172.17.1.18/ccd-status/`.
-3. **IITG webmaster:** proxy `https://iitg.ac.in/ccd-status/` → `http://172.17.1.18/ccd-status/` (keep the path as is; SSE needs response buffering off for `/ccd-status/api/stream`, otherwise the page just polls `status.json` every 30 s, which also works).
+2. **Check** `curl -s http://127.0.0.1:6059/ccd-status/api/health` and open `http://172.17.1.148/ccd-status/`.
+3. **IITG webmaster:** proxy `https://iitg.ac.in/ccd-status/` → `http://172.17.1.148/ccd-status/` (keep the path as is; SSE needs response buffering off for `/ccd-status/api/stream`, otherwise the page just polls `status.json` every 30 s, which also works).
 
 Ports used: `6059` (gateway), `27018` (status mongo), `23750` (docker proxy), all bound to `127.0.0.1` only. Every container has `restart: unless-stopped`, a HEALTHCHECK, a memory limit, and log rotation (`10m × 3`).
 
@@ -170,4 +170,4 @@ These are findings from the audit, listed for later. **None was changed.**
 
 ## Optional Phase 3 (not built)
 
-A status page on `172.17.1.18` cannot report that `172.17.1.18` itself is down. Suggested: a tiny external watchdog outside campus, a GitHub Actions cron (every 5 min) that GETs the public `https://iitg.ac.in/<app>/` URLs and `https://iitg.ac.in/ccd-status/api/health`, and alerts via Telegram/email on failure (or a free hosted uptime pinger). It tests the same public path outside users see.
+A status page on `172.17.1.148` cannot report that `172.17.1.148` itself is down. Suggested: a tiny external watchdog outside campus, a GitHub Actions cron (every 5 min) that GETs the public `https://iitg.ac.in/<app>/` URLs and `https://iitg.ac.in/ccd-status/api/health`, and alerts via Telegram/email on failure (or a free hosted uptime pinger). It tests the same public path outside users see.

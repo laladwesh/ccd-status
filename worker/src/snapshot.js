@@ -51,7 +51,7 @@ export async function buildSnapshot({ models, engine }) {
   const is = (n) => stateByKey.get(`infra:${n}`);
   const dns = is('dns'); const gateway = is('gateway'); const mongo = is('mongo'); const tls = is('tls');
   const infraOut = {
-    server: { label: 'Server 172.17.1.18', state: 'operational', detail: 'monitoring worker alive' },
+    server: { label: 'Server 172.17.1.148', state: 'operational', detail: 'monitoring worker alive' },
     dns: { label: 'iitg.ac.in DNS', state: dns?.state || 'unknown', detail: dns?.detail?.error || dns?.detail?.detail || null },
     gateway: { label: 'Campus gateway', state: gateway?.state || 'unknown', detail: gateway?.detail?.error || (gateway?.detail?.statusCode ? `HTTP ${gateway.detail.statusCode}` : null), latencyMs: gateway?.latencyMs ?? null },
     tls: { label: 'TLS certificate', state: tls?.state || 'unknown', detail: tls?.detail?.daysLeft != null ? `${tls.detail.daysLeft} days left` : tls?.detail?.error || null, daysLeft: tls?.detail?.daysLeft ?? null },
