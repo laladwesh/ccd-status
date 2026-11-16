@@ -9,7 +9,9 @@ import { adminRouter } from './routes/admin.js';
 
 export function createApp({ models, hub }) {
   const app = express();
-  app.set('trust proxy', true); // behind host nginx / the IITG proxy
+  // Behind gateway nginx -> host nginx -> IITG proxy. Trust only private/loopback hops, never `true`
+  // (that lets any client spoof X-Forwarded-For and bypass the rate limiter).
+  app.set('trust proxy', cfg.trustProxy);
   app.disable('x-powered-by');
   app.use(helmet());
   app.use(cors({

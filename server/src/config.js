@@ -7,6 +7,7 @@ export const cfg = {
   adminUser: env.ADMIN_USERNAME || 'admin',
   adminHash: env.ADMIN_PASSWORD_HASH,
   corsOrigins: (env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean),
+  trustProxy: env.TRUST_PROXY || 'loopback, linklocal, uniquelocal',
   staleAfterSec: 180, // worker considered down if the snapshot is older than this
 };
 
