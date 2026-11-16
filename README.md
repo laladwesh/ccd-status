@@ -2,7 +2,7 @@
 
 Status page for the IIT Guwahati Centre for Career Development portals. It tells **container**, **host nginx**, **database**, **upstream (campus network / iitg.ac.in)** and **application** problems apart, so one campus outage does not show up as a dozen broken services.
 
-Served at `/ccd-status/` (host nginx on `172.17.1.148` → gateway on `127.0.0.1:6059`). Later the IITG webmaster proxies `https://iitg.ac.in/ccd-status/` → `http://172.17.1.148/ccd-status/`. The build is path-stable (`/ccd-status/`), so it works in both places unchanged.
+Served at `/ccd-status/` (host nginx on `<SERVER_IP>` → gateway on `127.0.0.1:6059`). Later the IITG webmaster proxies `https://iitg.ac.in/ccd-status/` → `http://<SERVER_IP>/ccd-status/`. The build is path-stable (`/ccd-status/`), so it works in both places unchanged.
 
 > See [AUDIT.md](AUDIT.md) for the Phase 1 findings this is based on, and [WEBMASTER.md](WEBMASTER.md) for the request to send to the IITG webmaster.
 
@@ -54,7 +54,7 @@ The host mongod is shared by almost every portal, so a Mongo outage is exactly w
 | `down` | container not running / restart loop, or the app port probe fails |
 | `maintenance` | inside an admin maintenance window (no incidents, no alerts) |
 
-Three HTTP tiers per service, innermost first: **app port** (`127.0.0.1:<port>`) → **host nginx** (`http://127.0.0.1<path>` with `Host: 172.17.1.148`) → **public** (`https://iitg.ac.in/...`). A failing app port is always `down` (nginx would 502 too). Services not behind nginx (training `frontend`/`backend`, `placement_portal_frontend`) only have the app-port probe; `industry_backend` is container-only.
+Three HTTP tiers per service, innermost first: **app port** (`127.0.0.1:<port>`) → **host nginx** (`http://127.0.0.1<path>` with `Host: <SERVER_IP>`) → **public** (`https://iitg.ac.in/...`). A failing app port is always `down` (nginx would 502 too). Services not behind nginx (training `frontend`/`backend`, `placement_portal_frontend`) only have the app-port probe; `industry_backend` is container-only.
 
 Overall banner precedence: upstream → host nginx → shared database → per-service counts.
 Anti-flapping: worsening needs **3** consecutive identical results, recovery **2**. Interval 60 s, timeout 10 s, 5 concurrent probes. A restart loop (`Restarting`, or 3+ restarts in 10 min) counts as DOWN.
@@ -73,36 +73,35 @@ Tests: `cd shared && npm test` (status logic, snapshot incl. "Mongo down → ban
 
 ---
 
-## Deploy on the server (manual) — `/webapps/ccd-status`
+## Deploy on the server (manual) — `<DEPLOY_DIR>`
 
-Server facts this was built for: `172.17.1.148`, Docker Compose v2.26.1, ports `6059`, `6060`, `23750` free, `https://iitg.ac.in/` reachable from the server, host `mongod` on `127.0.0.1:27017`.
+Server facts this was built for: `<SERVER_IP>`, Docker Compose v2.26.1, ports `6059`, `6060`, `23750` free, `https://iitg.ac.in/` reachable from the server, host `mongod` on `127.0.0.1:27017`.
 
 ### 1. Clone (private GitHub repo, read-only deploy key)
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/ccd_status_deploy -N "" -C "ccd-status deploy"
 cat ~/.ssh/ccd_status_deploy.pub       # GitHub repo -> Settings -> Deploy keys -> Add key (leave "Allow write access" OFF)
 
-sudo mkdir -p /webapps && sudo chown "$USER": /webapps
-cd /webapps
-GIT_SSH_COMMAND="ssh -i ~/.ssh/ccd_status_deploy -o IdentitiesOnly=yes" git clone git@github.com:<OWNER>/<REPO>.git ccd-status
-cd ccd-status && git config core.sshCommand "ssh -i ~/.ssh/ccd_status_deploy -o IdentitiesOnly=yes"
+mkdir -p "$(dirname <DEPLOY_DIR>)"        # the parent directory must exist and be writable by you
+GIT_SSH_COMMAND="ssh -i ~/.ssh/ccd_status_deploy -o IdentitiesOnly=yes" git clone git@github.com:<OWNER>/<REPO>.git <DEPLOY_DIR>
+cd <DEPLOY_DIR> && git config core.sshCommand "ssh -i ~/.ssh/ccd_status_deploy -o IdentitiesOnly=yes"
 ```
-If campus egress blocks SSH on port 22: `git clone ssh://git@ssh.github.com:443/<OWNER>/<REPO>.git ccd-status`.
+If campus egress blocks SSH on port 22: `git clone ssh://git@ssh.github.com:443/<OWNER>/<REPO>.git <DEPLOY_DIR>`.
 
 ### 2. (Recommended) create a MongoDB user limited to the `ccd-status` database
-The host mongod currently runs without auth in the URI (see Known issues). If you enable auth, give the status page its own user, restricted to its own database:
+Give the status page its own database user, restricted to its own database:
 ```bash
-mongosh -u <admin-user> -p --authenticationDatabase admin      # omit -u/-p if auth is still off
+mongosh -u <admin-user> -p --authenticationDatabase admin      # add credentials only if your MongoDB requires them
 ```
 ```js
 use ccd-status
 db.createUser({ user: "ccdstatus", pwd: passwordPrompt(), roles: [{ role: "readWrite", db: "ccd-status" }] })
 ```
-Then in `.env`: `MONGO_URI=mongodb://ccdstatus:<password>@127.0.0.1:27017/ccd-status?authSource=ccd-status` (URL-encode special characters in the password). With auth still off, the plain `mongodb://127.0.0.1:27017/ccd-status` works. Either way the page never touches another database.
+Then in `.env`: `MONGO_URI=mongodb://ccdstatus:<password>@127.0.0.1:27017/ccd-status?authSource=ccd-status` (URL-encode special characters in the password). If your MongoDB needs no credentials, the plain `mongodb://127.0.0.1:27017/ccd-status` works. Either way the page never touches another database.
 
 ### 3. Configure `.env`
 ```bash
-cd /webapps/ccd-status
+cd <DEPLOY_DIR>
 cp .env.example .env && chmod 600 .env
 nano .env        # MONGO_URI, ADMIN_PASSWORD_HASH, JWT_SECRET (see below); alerts stay off by default
 ```
@@ -114,7 +113,7 @@ Paste the output into `.env` as `ADMIN_PASSWORD_HASH='<hash>'` (**single quotes*
 
 ### 4. Build and start
 ```bash
-cd /webapps/ccd-status
+cd <DEPLOY_DIR>
 GIT_SHA=$(git rev-parse --short=12 HEAD) BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) docker compose up -d --build
 ```
 (`docker compose up -d --build` alone also works; the two variables only set the image labels and tags `ccd-status-*:<sha>`.)
@@ -131,7 +130,7 @@ docker compose logs --tail 50 worker                               # shows "data
 If something is unhealthy: `docker compose logs --tail 50 <worker|server|gateway|socket-proxy>`.
 
 ### 6. Apply the nginx block (by hand)
-[deploy/host-nginx-ccd-status.conf](deploy/host-nginx-ccd-status.conf) must be pasted into the **FIRST** `server { }` block (the one with `server_name 172.17.1.148`) of `/etc/nginx/sites-enabled/default`, just before that block's closing brace. **Do not touch the second, duplicate server block.** The block is:
+[deploy/host-nginx-ccd-status.conf](deploy/host-nginx-ccd-status.conf) must be pasted into the **FIRST** `server { }` block (the one with `server_name <SERVER_IP>`) of `/etc/nginx/sites-enabled/default`, just before that block's closing brace. **Do not touch the second, duplicate server block.** The block is:
 ```nginx
 location = /ccd-status { return 301 /ccd-status/; }
 
@@ -161,8 +160,8 @@ sudo nano /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 
 # d) verify through nginx
-curl -sI http://172.17.1.148/ccd-status/ | head -1             # HTTP/1.1 200 OK
-curl -s  http://172.17.1.148/ccd-status/api/health
+curl -sI http://<SERVER_IP>/ccd-status/ | head -1             # HTTP/1.1 200 OK
+curl -s  http://<SERVER_IP>/ccd-status/api/health
 ```
 `nginx -t` keeps printing the existing "conflicting server name" warning for the duplicate block. That is pre-existing; what matters is `syntax is ok` / `test is successful`.
 
@@ -174,11 +173,11 @@ sudo nginx -t && sudo systemctl reload nginx
 If `nginx -t` fails, do not reload: the running nginx keeps serving the old config until you do.
 
 ### 7. IITG webmaster
-Send [WEBMASTER.md](WEBMASTER.md). Until it is in place the page works at `http://172.17.1.148/ccd-status/`, and the public probes keep checking the other portals normally.
+Send [WEBMASTER.md](WEBMASTER.md). Until it is in place the page works at `http://<SERVER_IP>/ccd-status/`, and the public probes keep checking the other portals normally.
 
 ### Update
 ```bash
-cd /webapps/ccd-status
+cd <DEPLOY_DIR>
 git pull
 GIT_SHA=$(git rev-parse --short=12 HEAD) BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) docker compose up -d --build --remove-orphans
 docker compose ps
@@ -188,7 +187,7 @@ Rebuild periodically with `docker compose build --pull` to pick up base-image se
 ### Roll back the application
 Images are tagged with the git SHA you built from (`docker images 'ccd-status-*'`). To go back to a known-good commit:
 ```bash
-cd /webapps/ccd-status
+cd <DEPLOY_DIR>
 git log --oneline | head           # pick the good <sha>
 git checkout <sha>
 GIT_SHA=$(git rev-parse --short=12 HEAD) BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) docker compose up -d --build
@@ -199,9 +198,9 @@ Data is not affected: it lives in the `ccd-status` database and the `ccd_status_
 ### Backup (run by hand; no cron, no script)
 One line: dumps **only** the `ccd-status` database (the URI names it) to a dated, gzipped archive.
 ```bash
-mkdir -p /webapps/ccd-status/backups && mongodump --uri "$(grep '^MONGO_URI=' /webapps/ccd-status/.env | cut -d= -f2-)" --gzip --archive=/webapps/ccd-status/backups/$(date +%F).gz
+mkdir -p <DEPLOY_DIR>/backups && mongodump --uri "$(grep '^MONGO_URI=' <DEPLOY_DIR>/.env | cut -d= -f2-)" --gzip --archive=<DEPLOY_DIR>/backups/$(date +%F).gz
 ```
-Needs `mongodump` (mongodb-database-tools) on the host. If the URI contains a password it is visible in `ps` while the command runs. Restore: `mongorestore --uri "<same MONGO_URI>" --gzip --archive=/webapps/ccd-status/backups/<date>.gz --nsInclude 'ccd-status.*'`. `backups/` is git-ignored. The data is operational history (30 days of checks, 365 days of daily rollups), so losing it is not critical.
+Needs `mongodump` (mongodb-database-tools) on the host. If the URI contains a password it is visible in `ps` while the command runs. Restore: `mongorestore --uri "<same MONGO_URI>" --gzip --archive=<DEPLOY_DIR>/backups/<date>.gz --nsInclude 'ccd-status.*'`. `backups/` is git-ignored. The data is operational history (30 days of checks, 365 days of daily rollups), so losing it is not critical.
 
 ---
 
@@ -252,29 +251,5 @@ Collections in `ccd-status`: `checks` (TTL 30 d), `dailyrollups` (TTL 365 d, dri
 - `docker-compose.yml` parses (all services as specified); `gateway.nginx.conf` template renders with no leftover placeholders. There are no deploy or backup scripts and no cron: everything is the manual steps above.
 - **Not tested here (no Docker or nginx on the dev machine):** the Dockerfiles/compose build, the container healthchecks, `read_only` + tmpfs behaviour, the socket-proxy image (`read_only` and the `wget` healthcheck assumptions), the nginx configs. Watch `docker compose logs -f` on first deploy. If the socket-proxy refuses to start with `read_only: true`, remove that one line.
 
-## Known issues / future work (nothing in the portal repos was touched)
-
-**Monitoring accuracy**
-- Only `dday` (`/dday/api/health`) and `intern-2026` (`/intern-2026/api/health`) have real health routes; every other service is probed on a shell/static route ("basic"), which proves the process is up but **not** that its database works. Suggest adding a `GET /health` that pings Mongo to: Placement, Intern, PhD, CCD App Backend, AIPC, DPR, the training backend and the industry portal.
-- `training-backend` (5004): no known route, so any HTTP response below 500 counts as up.
-- `industry_backend` is monitored by container state only, with the reason "Restart loop: /app/package.json missing in image" (`knownIssue` in `shared/services.config.js`; remove it once fixed so the real reason shows).
-- `https://iitg.ac.in/ccd-app/` redirects to `/ccd-app/policies`; redirects count as up (never followed). `/training` → `127.0.0.1:5001` (ccd-app) is confirmed.
-
-**Infrastructure / security. None of this was changed.**
-- **CRITICAL: the host `mongod` listens on `0.0.0.0:27017` and the URI used by this page (and the D-Day portal) has no credentials**, so the database is reachable from the campus LAN. Verify authentication is enabled; if not, enable it (`security.authorization: enabled`) and bind it to `127.0.0.1` (`net.bindIp`) or firewall port 27017. All portals here run with host networking, so loopback is enough. After enabling auth, give each application its own user (see step 2 for this page).
-- All portal ports (`5000`, `5005`, `5009`, `6001`, `6025`, `6026`, `7002`, `11034`) listen on all interfaces and can be reached directly, bypassing nginx. `3000`, `3012`, `5001` and `5004` are published by Docker on `0.0.0.0`. Bind them to `127.0.0.1` (or firewall) where nginx is the only intended entry.
-- **`industry_backend` restart loop (exit 254):** the image lacks `/app/package.json` (probably a missing bind mount or a bad build; the running image is unnamed `76976256732a`). Separately, nginx `/industry-backend` proxies to `:5002` but the code listens on `8081` (the Dockerfile says `EXPOSE 5002`).
-- **Dead nginx routes returning 502:** `/oa-check` (→ 6021), `/ccd-industry/` (→ 5011), `/industry-backend` (→ 5002). Nothing listens on those ports (oa and industry-payment are not deployed).
-- **Duplicate `server` block** in `/etc/nginx/sites-enabled/default` (nginx warns "conflicting server name"). Which block wins is order-dependent; remove the duplicate when convenient.
-- One host MongoDB is a single point of failure for most portals (and, by design, for this page's history; its live status is not affected).
-- Secret files in working trees: `.env` files in many repos, `CCD-App-Backend/serviceAccountKey.json`, and a Sentry DSN committed in the Placement frontend.
-- Stale/duplicate repos: `Intern-Portal-2023` vs `latest-intern-portal` (live: `latest-intern-portal`), `ccdIndustry` has two frontends. Old Node 16/18 images and Mongoose 6 in the Placement/Intern portals.
-
-**This project**
-- The upstream check runs from the server itself. It reached `https://iitg.ac.in/` fine (200, 0.23 s) when tested.
-- `tecnativa/docker-socket-proxy:0.3.0` is pinned from memory; confirm the tag pulls (otherwise use the newest tag).
-- The Docker base images are tag-pinned (`node:20-alpine`, `nginxinc/nginx-unprivileged:1.27-alpine`), not digest-pinned, so they pick up security patches on rebuild; scanners will flag known CVEs in them until you rebuild with `--pull`.
-- Not yet verified on the real server: the `Host: 172.17.1.148` header sent by the nginx probe matching the first server block (it should: that block has `server_name 172.17.1.148`).
-
 ## Optional Phase 3 (not built)
-A status page on `172.17.1.148` cannot report that `172.17.1.148` itself is down. Suggested: a tiny external watchdog outside campus, a GitHub Actions cron (every 5 min) that GETs the public `https://iitg.ac.in/<app>/` URLs and `https://iitg.ac.in/ccd-status/api/health`, and alerts via Telegram/email on failure (or a free hosted uptime pinger). It tests the same public path outside users see.
+A status page on `<SERVER_IP>` cannot report that `<SERVER_IP>` itself is down. Suggested: a tiny external watchdog outside campus, a GitHub Actions cron (every 5 min) that GETs the public `https://iitg.ac.in/<app>/` URLs and `https://iitg.ac.in/ccd-status/api/health`, and alerts via Telegram/email on failure (or a free hosted uptime pinger). It tests the same public path outside users see.

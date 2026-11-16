@@ -7,3 +7,6 @@ dist/
 data/
 backups/
 .DS_Store
+
+# Private notes (never commit)
+*.local.md

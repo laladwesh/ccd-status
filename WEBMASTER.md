@@ -6,7 +6,7 @@ Please add one route to the `iitg.ac.in` reverse proxy:
 
 | Public URL | Backend |
 |---|---|
-| `https://iitg.ac.in/ccd-status/` | `http://172.17.1.148/ccd-status/` |
+| `https://iitg.ac.in/ccd-status/` | `http://<SERVER_IP>/ccd-status/` |
 
 It is a read-only status page that shows whether the CCD portals (Placement, Intern, D-Day, Training, PhD, ...) are up. It is served by the same host and nginx as the other CCD portals, in the same way as `https://iitg.ac.in/placements/` and `https://iitg.ac.in/intern/`.
 
@@ -22,7 +22,7 @@ It is a read-only status page that shows whether the CCD portals (Placement, Int
 
 ```nginx
 location /ccd-status/ {
-    proxy_pass http://172.17.1.148;          # no trailing slash: the path is preserved
+    proxy_pass http://<SERVER_IP>;          # no trailing slash: the path is preserved
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
