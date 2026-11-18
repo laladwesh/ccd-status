@@ -9,7 +9,6 @@ Served at `/ccd-status/` (host nginx on `<SERVER_IP>` → gateway on `127.0.0.1:
 ## Architecture
 
 Four long-running containers plus a one-shot `init-perms`; compose project `ccd-status`, all named `ccd-status-*`. Server, worker and gateway use `network_mode: host` like the other CCD portals.
-
 ```
  browser ─► (IITG proxy) ─► host nginx :80 ─► gateway  127.0.0.1:6059   (nginx, serves client + status.json)
                                                 │   ├─ /ccd-status/              static React build
